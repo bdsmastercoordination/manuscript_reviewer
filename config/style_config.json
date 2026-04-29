@@ -1,0 +1,51 @@
+{
+  "quotation_marks": {
+    "default": "smart_double",
+    "flag_as": "PUNCTUATION",
+    "label": "Dialogue quotation marks",
+    "rules": {
+      "smart_double": "Curly double quotes (“”) — flag straight doubles (\") and any single-quoted dialogue",
+      "dumb_double": "Straight double quotes (\") — flag curly doubles (“”) and any single-quoted dialogue",
+      "smart_single": "Curly single quotes (‘’) — flag straight singles (') and any double-quoted dialogue",
+      "dumb_single": "Straight single quotes (') — flag curly singles (‘’) and any double-quoted dialogue"
+    }
+  },
+  "ellipsis": {
+    "default": "nbsp_spaced",
+    "flag_as": "PUNCTUATION",
+    "label": "Ellipsis style",
+    "rules": {
+      "nbsp_spaced": "Dots separated by non-breaking spaces (. . .) — flag plain dots (...), spaced dots (. . .), and Unicode (…)",
+      "spaced": "Dots separated by regular spaces (. . .) — flag non-breaking-space dots, plain dots (...), and Unicode (…)",
+      "unicode": "Unicode ellipsis character (…) — flag plain dots (...) and spaced dots (. . .)",
+      "unspaced": "Three plain dots (...) — flag Unicode (…) and spaced dots (. . .)"
+    }
+  },
+  "em_dash_spacing": {
+    "default": "tight",
+    "flag_as": "PUNCTUATION",
+    "label": "Em dash spacing",
+    "rules": {
+      "tight": "No spaces around em dash (word—word) — flag spaced em dashes (word — word)",
+      "spaced": "Spaces around em dash (word — word) — flag tight em dashes (word—word)"
+    }
+  },
+  "oxford_comma": {
+    "default": "yes",
+    "flag_as": "PUNCTUATION",
+    "label": "Oxford (serial) comma",
+    "rules": {
+      "yes": "Oxford comma before ‘and’ in lists (a, b, and c) — flag missing serial commas",
+      "no": "No Oxford comma (a, b and c) — flag spurious serial commas"
+    }
+  },
+  "language": {
+    "default": "american",
+    "flag_as": "SPELLING",
+    "label": "Spelling convention",
+    "rules": {
+      "american": "American English — flag British spellings: -ise/-isation endings (realise → realize, recognised → recognized, organised → organized), -our endings (colour → color, favour → favor), -re endings (centre → center, theatre → theater), doubled consonants in inflections (travelling → traveling, cancelled → canceled)",
+      "british": "British English — flag American spellings: -ize/-ization endings (realize → realise, recognized → recognised), -or endings (color → colour, favor → favour), -er endings (center → centre, theater → theatre)"
+    }
+  }
+}

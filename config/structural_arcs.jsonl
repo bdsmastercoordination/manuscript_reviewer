@@ -1,0 +1,20 @@
+{"id": "quest", "name": "Quest Arc", "description": "pursue a clear goal across stages (includes fetch/delivery variants)"}
+{"id": "heist", "name": "Heist/Con Arc", "description": "plan, assemble, execute, twist (covers grifts)"}
+{"id": "mystery", "name": "Mystery/Investigation Arc", "description": "uncover hidden truth via clues"}
+{"id": "revenge", "name": "Revenge Arc", "description": "retaliation escalates toward confrontation"}
+{"id": "rivalry", "name": "Rivalry Arc", "description": "sustained competition with rising stakes"}
+{"id": "war", "name": "War/Campaign Arc", "description": "large-scale conflict in phases"}
+{"id": "rebellion", "name": "Rebellion Arc", "description": "uprising against authority or system"}
+{"id": "infiltration", "name": "Infiltration Arc", "description": "penetrate and operate within enemy structure"}
+{"id": "survival", "name": "Survival Arc", "description": "endure escalating threats"}
+{"id": "escape", "name": "Escape/Chase Arc", "description": "flee or pursue under continuous pressure"}
+{"id": "siege", "name": "Siege/Containment Arc", "description": "trapped situation with tightening constraints"}
+{"id": "exploration", "name": "Exploration/Discovery Arc", "description": "map or understand the unknown"}
+{"id": "conspiracy", "name": "Conspiracy/Uncovering Arc", "description": "hidden system gradually revealed"}
+{"id": "rise", "name": "Rise Arc", "description": "accumulation of power, status, or success"}
+{"id": "fall", "name": "Fall Arc", "description": "loss of power, status, or control"}
+{"id": "underdog", "name": "Underdog Arc", "description": "disadvantaged to competitive relevance"}
+{"id": "romance", "name": "Romance Arc", "description": "attraction, obstacles, union or separation"}
+{"id": "alliance", "name": "Alliance/Betrayal Arc", "description": "trust forms and/or breaks"}
+{"id": "group", "name": "Group Formation/Breakdown Arc", "description": "team assembles or fractures"}
+{"id": "countdown", "name": "Countdown Arc", "description": "ticking clock drives structure and urgency"}

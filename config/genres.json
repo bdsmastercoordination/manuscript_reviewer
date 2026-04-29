@@ -1,0 +1,104 @@
+{
+  "genres": [
+    {
+      "name": "Literary Fiction",
+      "description": "Character-driven stories focused on style, theme, and psychological depth rather than plot.",
+      "tropes": ["coming of age", "unreliable narrator", "quiet epiphany", "family dysfunction", "internal conflict", "situational irony", "authorial intrusion", "sacrifice and selfless love", "poverty as condition", "dramatic irony"]
+    },
+    {
+      "name": "Historical Fiction",
+      "description": "Stories set in a real past era, blending fictional characters with historical context.",
+      "tropes": ["forbidden love across classes", "war-torn backdrop", "real figure cameo", "diary or letters", "fish out of time"]
+    },
+    {
+      "name": "Romance",
+      "description": "Stories centered on a romantic relationship with an emotionally satisfying ending.",
+      "tropes": ["enemies to lovers", "fake dating", "love triangle", "second chance romance", "grumpy/sunshine", "sacrifice for love", "devoted partnership"]
+    },
+    {
+      "name": "Mystery",
+      "description": "A puzzle-driven story where a crime or secret must be solved.",
+      "tropes": ["whodunit", "red herrings", "locked room mystery", "amateur sleuth", "twist ending"]
+    },
+    {
+      "name": "Thriller",
+      "description": "Fast-paced stories built on tension, danger, and high stakes.",
+      "tropes": ["race against time", "conspiracy", "cat and mouse chase", "false accusation", "cliffhanger chapters"]
+    },
+    {
+      "name": "Crime",
+      "description": "Stories focused on criminal activity, law enforcement, or the justice system.",
+      "tropes": ["heist gone wrong", "morally gray detective", "organized crime family", "inside man", "double cross"]
+    },
+    {
+      "name": "Horror",
+      "description": "Stories intended to evoke fear, dread, or psychological unease.",
+      "tropes": ["haunted house", "final girl", "ancient evil", "possession", "descent into madness"]
+    },
+    {
+      "name": "Science Fiction",
+      "description": "Speculative stories based on futuristic science, technology, or space exploration.",
+      "tropes": ["alien contact", "time travel paradox", "AI uprising", "space opera", "dystopian future"]
+    },
+    {
+      "name": "Fantasy",
+      "description": "Stories set in imaginary worlds with magic or supernatural elements.",
+      "tropes": ["chosen one", "quest", "dark lord", "magical artifact", "mentor wizard"]
+    },
+    {
+      "name": "Dystopian",
+      "description": "Stories set in oppressive or broken societies, often as a warning.",
+      "tropes": ["totalitarian regime", "rebellion", "surveillance state", "propaganda", "loss of individuality"]
+    },
+    {
+      "name": "Young Adult",
+      "description": "Stories aimed at teens, often focusing on identity, growth, and first experiences.",
+      "tropes": ["coming of age", "first love", "chosen teen hero", "school setting", "rebellion against authority"]
+    },
+    {
+      "name": "New Adult",
+      "description": "Stories about early adulthood, independence, and transitions into mature life.",
+      "tropes": ["college setting", "found family", "identity crisis", "intense romance", "career struggles"]
+    },
+    {
+      "name": "Adventure",
+      "description": "Stories driven by journeys, exploration, and exciting challenges.",
+      "tropes": ["treasure hunt", "survival in the wild", "expedition", "lost world", "perilous journey"]
+    },
+    {
+      "name": "Action",
+      "description": "Stories emphasizing physical conflict, combat, and high-energy sequences.",
+      "tropes": ["one-man army", "explosive finale", "revenge mission", "training montage", "unstoppable villain"]
+    },
+    {
+      "name": "Paranormal",
+      "description": "Stories involving supernatural elements within a real-world setting.",
+      "tropes": ["ghost romance", "psychic powers", "vampire society", "werewolf pack", "haunted protagonist"]
+    },
+    {
+      "name": "Urban Fantasy",
+      "description": "Fantasy stories set in modern cities where magic exists alongside reality.",
+      "tropes": ["hidden magical world", "supernatural detective", "secret societies", "magic underworld", "ancient beings in modern life"]
+    },
+    {
+      "name": "Magical Realism",
+      "description": "Realistic settings where subtle magical elements are treated as normal.",
+      "tropes": ["matter-of-fact magic", "family legacy curse", "blending myth and reality", "timeless setting", "symbolic transformations"]
+    },
+    {
+      "name": "Western",
+      "description": "Stories set in the American frontier, often involving lawlessness and survival.",
+      "tropes": ["lone gunslinger", "frontier justice", "saloon showdown", "outlaw vs sheriff", "harsh wilderness"]
+    },
+    {
+      "name": "Satire",
+      "description": "Stories that use humor, irony, or exaggeration to critique society or politics.",
+      "tropes": ["absurd bureaucracy", "parody of norms", "exaggerated flaws", "dark humor", "ironic narrator"]
+    },
+    {
+      "name": "Speculative Fiction",
+      "description": "Broad genre exploring imaginative 'what if' scenarios beyond real-world constraints.",
+      "tropes": ["alternate history", "parallel worlds", "what-if premise", "butterfly effect", "societal thought experiment"]
+    }
+  ]
+}
