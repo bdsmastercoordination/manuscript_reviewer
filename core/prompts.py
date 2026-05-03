@@ -31,10 +31,11 @@ def _build_style_block() -> str:
         rule = cfg["rules"][cfg["default"]]
         groups.setdefault(flag_type, []).append(f"  • {cfg['label']}: {rule}")
 
-    lines = []
+    all_rules: list[str] = []
     for flag_type in sorted(groups):
-        lines.append(f"House style — flag deviations as {flag_type}:")
-        lines.extend(groups[flag_type])
+        all_rules.extend(groups[flag_type])
+    lines = ["House style rules (apply the same TYPE classification and NONERROR threshold as for other issues):"]
+    lines.extend(all_rules)
     return "\n".join(lines)
 
 
@@ -80,9 +81,8 @@ Review the provided manuscript excerpt and identify only these {len(entries)} ty
 Output structured entries only — no preamble, no reasoning, no category headings.
 For each potential issue found, use this exact format:
 TEXT: "[quote the exact problematic text, up to ~10 words]"
-OBSERVATION: [one sentence describing what you see]
+ISSUE: [one sentence describing the potential issue, or why on reflection this is not a genuine error]
 TYPE: [{type_labels} | NONERROR]
-ISSUE: [brief description — omit this line if TYPE is NONERROR]
 ---
 
 Use TYPE: NONERROR when on reflection the text does not meet the threshold for a genuine issue.
