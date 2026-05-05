@@ -186,9 +186,12 @@ async def _analyze_async(
     model: str,
     on_progress,
     enabled_genres: list[str] | None = None,
+    extra_genres:   list[dict] | None = None,
     on_raw=None,
 ) -> tuple[list[GenreResult], TokenUsage]:
     all_genres   = load_genres()
+    if extra_genres:
+        all_genres = all_genres + extra_genres
     genres       = (
         [g for g in all_genres if g["name"] in enabled_genres]
         if enabled_genres is not None else all_genres
@@ -244,10 +247,11 @@ def analyze_genres(
     model: str = DEFAULT_MODEL,
     on_progress=None,
     enabled_genres: list[str] | None = None,
+    extra_genres:   list[dict] | None = None,
     on_raw=None,
 ) -> tuple[list[GenreResult], TokenUsage]:
     """Detect genre tropes in a .docx file. Returns (results, usage)."""
     text = load_docx(filepath)
     if not text.strip():
         return [], TokenUsage()
-    return asyncio.run(_analyze_async(text, model, on_progress, enabled_genres, on_raw))
+    return asyncio.run(_analyze_async(text, model, on_progress, enabled_genres, extra_genres, on_raw))

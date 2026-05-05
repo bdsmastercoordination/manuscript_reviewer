@@ -1,4 +1,5 @@
 import os
+import re
 import ctypes
 import threading
 import tkinter as tk
@@ -34,6 +35,16 @@ from core.cache import (
 from config.archetype_icons import ICON_PATH as ARCH_ICON_PATH
 
 EMOTION_ICONS_DIR = Path(__file__).parent / "assets" / "emotions"
+_EMOTION_CUSTOM_ICON = EMOTION_ICONS_DIR / "custom.png"
+
+
+def _emotion_icon_path(eid: str) -> Path:
+    """Return the icon path for an emotion ID, falling back to custom.jpg."""
+    p = EMOTION_ICONS_DIR / f"{eid}.png"
+    if p.exists():
+        return p
+    return _EMOTION_CUSTOM_ICON
+
 
 # ── palette ───────────────────────────────────────────────────────────────────
 # BG matches the logo's own background (#fdf9f6) — seamless on landing and app
@@ -671,7 +682,7 @@ def _make_emotion_plot_widget(parent, sheets, total_chunks=None):
     return frame
 
 
-def _make_emotion_radar_widget(parent, sheet) -> tk.Frame | None:
+def _make_emotion_radar_widget(parent, sheet, extra_emotions=None) -> tk.Frame | None:
     """
     Render a polar spider-web (radar) chart for one character's emotion profile.
     Scores are reconstructed from signals_ordered so all emotion spokes are shown.
@@ -685,6 +696,9 @@ def _make_emotion_radar_widget(parent, sheet) -> tk.Frame | None:
         return None
 
     emotions = load_emotions()
+    if extra_emotions:
+        known_ids = {e["id"] for e in emotions}
+        emotions = emotions + [e for e in extra_emotions if e["id"] not in known_ids]
     if not emotions:
         return None
 
@@ -694,7 +708,7 @@ def _make_emotion_radar_widget(parent, sheet) -> tk.Frame | None:
                       "sadness", "disgust", "anger", "pride", "shame"]
     by_id   = {e["id"]: e for e in emotions}
     ordered = [by_id[eid] for eid in PLUTCHIK_ORDER if eid in by_id]
-    # Append any emotions not covered by the fixed order
+    # Append any emotions not covered by the fixed order (including custom ones)
     ordered += [e for e in emotions if e["id"] not in PLUTCHIK_ORDER]
 
     all_ids = [e["id"] for e in ordered]
@@ -1170,8 +1184,10 @@ def _write_arch_report(path: str, title: str, sheets) -> None:
             bg_rgb_b = (253, 249, 246)
             for arch_id, _, _ in top3:
                 try:
-                    ic = Image.open(ARCH_ICON_PATH(arch_id)).convert("RGB")
-                    arr = _np.array(ic)
+                    _raw = Image.open(ARCH_ICON_PATH(arch_id)).convert("RGBA")
+                    _bg  = Image.new("RGBA", _raw.size, bg_rgb_b + (255,))
+                    ic   = Image.alpha_composite(_bg, _raw).convert("RGB")
+                    arr  = _np.array(ic)
                     arr[(arr[:,:,0]>240)&(arr[:,:,1]>240)&(arr[:,:,2]>240)] = bg_rgb_b
                     ic = Image.fromarray(arr.astype(_np.uint8))
                     ow, oh = ic.size
@@ -1394,7 +1410,7 @@ def _write_emotion_report(path: str, title: str, sheets) -> None:
             bx = badge_x0
             for emot_id, _, _ in top3:
                 try:
-                    ic = Image.open(EMOTION_ICONS_DIR / f"{emot_id}.png").convert("RGBA")
+                    ic = Image.open(_emotion_icon_path(emot_id)).convert("RGBA")
                     ow, oh = ic.size
                     bw = badge_h_b * ow / oh
                     buf = _BIO(); ic.save(buf, format="PNG"); buf.seek(0)
@@ -1432,7 +1448,7 @@ def _write_emotion_report(path: str, title: str, sheets) -> None:
             try:
                 from io import BytesIO as _BIO2
                 from reportlab.lib.utils import ImageReader as _IR2
-                _ic2 = Image.open(EMOTION_ICONS_DIR / f"{eid}.png").convert("RGBA")
+                _ic2 = Image.open(_emotion_icon_path(eid)).convert("RGBA")
                 _buf2 = _BIO2(); _ic2.save(_buf2, format="PNG"); _buf2.seek(0)
                 _iw2 = ICON_H_PDF * _ic2.width / _ic2.height
                 c.drawImage(_IR2(_buf2), MARGIN, y - ICON_H_PDF + 1 * mm,
@@ -1673,6 +1689,52 @@ def _write_genre_report(path: str, title: str, results: list[GenreResult]) -> No
         y -= 5 * mm
 
     c.save()
+
+
+def _placeholder_entry(parent, placeholder: str, **kwargs) -> tk.Entry:
+    """Entry widget with gray placeholder text that clears on focus."""
+    entry = tk.Entry(parent, fg=TEXT_MUTED, **kwargs)
+    entry.insert(0, placeholder)
+    entry._has_placeholder = True
+
+    def _focus_in(_e):
+        if entry._has_placeholder:
+            entry.delete(0, tk.END)
+            entry.config(fg=TEXT)
+            entry._has_placeholder = False
+
+    def _focus_out(_e):
+        if not entry.get().strip():
+            entry.insert(0, placeholder)
+            entry.config(fg=TEXT_MUTED)
+            entry._has_placeholder = True
+
+    entry.bind("<FocusIn>", _focus_in)
+    entry.bind("<FocusOut>", _focus_out)
+    return entry
+
+
+def _placeholder_text(parent, placeholder: str, **kwargs) -> tk.Text:
+    """Text widget with gray placeholder text that clears on focus."""
+    widget = tk.Text(parent, fg=TEXT_MUTED, **kwargs)
+    widget.insert("1.0", placeholder)
+    widget._has_placeholder = True
+
+    def _focus_in(_e):
+        if widget._has_placeholder:
+            widget.delete("1.0", tk.END)
+            widget.config(fg=TEXT)
+            widget._has_placeholder = False
+
+    def _focus_out(_e):
+        if not widget.get("1.0", tk.END).strip():
+            widget.insert("1.0", placeholder)
+            widget.config(fg=TEXT_MUTED)
+            widget._has_placeholder = True
+
+    widget.bind("<FocusIn>", _focus_in)
+    widget.bind("<FocusOut>", _focus_out)
+    return widget
 
 
 def _cog_btn(parent, command):
@@ -2001,6 +2063,17 @@ class App(tk.Tk):
         self._arc_character_var = tk.BooleanVar(value=True)
         self._style_vars:     dict[str, tk.StringVar]  = {}
 
+        self._custom_archetypes: list[dict] = []
+        self._custom_emotions:   list[dict] = []
+        self._custom_genres:     list[dict] = []
+
+        self._arch_grid:       tk.Frame | None = None
+        self._emot_grid:       tk.Frame | None = None
+        self._genre_grid:      tk.Frame | None = None
+        self._arch_grid_count  = 0
+        self._emot_grid_count  = 0
+        self._genre_grid_count = 0
+
         self._copy_settings_open    = False
         self._arch_settings_open    = False
         self._emot_settings_open    = False
@@ -2008,6 +2081,17 @@ class App(tk.Tk):
         self._syn_settings_open     = False
 
         self._build()
+
+    # ── helpers ────────────────────────────────────────────────────────────────
+
+    def _unique_id(self, name: str, existing: dict) -> str:
+        base = re.sub(r"[^\w]+", "_", name.lower()).strip("_") or "custom"
+        if base not in existing:
+            return base
+        i = 2
+        while f"{base}_{i}" in existing:
+            i += 1
+        return f"{base}_{i}"
 
     # ── build ──────────────────────────────────────────────────────────────────
 
@@ -2630,6 +2714,309 @@ class App(tk.Tk):
 
         return panel
 
+    # ── custom-item restore (from cache) ──────────────────────────────────────
+
+    def _infer_custom_from_cache(self, kind: str, cached: dict) -> list:
+        """Derive custom items from cached sheet/result data when they weren't stored explicitly."""
+        if kind == "archetype":
+            known = {a["id"] for a in load_archetypes()}
+            found: dict = {}
+            for sheet in cached.get("sheets", []):
+                for arch_id, arch_name, *_ in sheet.top_archetypes:
+                    if arch_id not in known and arch_id not in found:
+                        found[arch_id] = {"id": arch_id, "name": arch_name, "description": ""}
+            return list(found.values())
+        elif kind == "emotion":
+            known = {e["id"] for e in load_emotions()}
+            found = {}
+            for sheet in cached.get("sheets", []):
+                for eid, ename, *_ in sheet.top_archetypes:
+                    if eid not in known and eid not in found:
+                        found[eid] = {"id": eid, "name": ename, "description": ""}
+            return list(found.values())
+        elif kind == "genre":
+            known = {g["name"] for g in load_genres()}
+            found = {}
+            for result in cached.get("results", []):
+                name = result.genre if hasattr(result, "genre") else result.get("genre", "")
+                if name and name not in known and name not in found:
+                    found[name] = {"name": name, "description": "", "tropes": []}
+            return list(found.values())
+        return []
+
+    def _restore_custom_items(self, kind: str, items: list) -> None:
+        """Re-insert cached custom elements into state and settings grid (main-thread only)."""
+        if not items:
+            return
+        if kind == "archetype":
+            for item in items:
+                aid = item.get("id", "")
+                if not aid or aid in self._archetype_vars:
+                    continue
+                self._custom_archetypes.append(item)
+                var = tk.BooleanVar(value=True)
+                self._archetype_vars[aid] = var
+                cols = 5
+                row, col = divmod(self._arch_grid_count, cols)
+                tk.Checkbutton(
+                    self._arch_grid, text=item["name"], variable=var,
+                    font=FONT_SMALL, bg=BG_SETTINGS, fg=TEXT,
+                    activebackground=BG_SETTINGS, activeforeground=TEXT,
+                    selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
+                ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
+                self._arch_grid_count += 1
+        elif kind == "emotion":
+            for item in items:
+                eid = item.get("id", "")
+                if not eid or eid in self._emotion_vars:
+                    continue
+                self._custom_emotions.append(item)
+                var = tk.BooleanVar(value=True)
+                self._emotion_vars[eid] = var
+                cols = 5
+                row, col = divmod(self._emot_grid_count, cols)
+                tk.Checkbutton(
+                    self._emot_grid, text=item["name"], variable=var,
+                    font=FONT_SMALL, bg=BG_SETTINGS, fg=TEXT,
+                    activebackground=BG_SETTINGS, activeforeground=TEXT,
+                    selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
+                ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
+                self._emot_grid_count += 1
+        elif kind == "genre":
+            for item in items:
+                name = item.get("name", "")
+                if not name or name in self._genre_vars:
+                    continue
+                self._custom_genres.append(item)
+                var = tk.BooleanVar(value=True)
+                self._genre_vars[name] = var
+                cols = 4
+                row, col = divmod(self._genre_grid_count, cols)
+                tk.Checkbutton(
+                    self._genre_grid, text=name, variable=var,
+                    font=FONT_SMALL, bg=BG_SETTINGS, fg=TEXT,
+                    activebackground=BG_SETTINGS, activeforeground=TEXT,
+                    selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
+                ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
+                self._genre_grid_count += 1
+
+    # ── custom-item dialogs ────────────────────────────────────────────────────
+
+    def _open_add_archetype_dialog(self):
+        win = tk.Toplevel(self)
+        win.title("Add custom archetype")
+        win.configure(bg=BG_SETTINGS)
+        win.resizable(False, False)
+        win.transient(self)
+        win.grab_set()
+
+        pad = {"padx": 14, "pady": 6}
+        tk.Label(win, text="Name", font=FONT_LABEL, fg=TEXT_MUTED,
+                 bg=BG_SETTINGS).grid(row=0, column=0, sticky="w", **pad)
+        name_entry = _placeholder_entry(
+            win, "e.g., The Shapeshifter",
+            font=FONT_SMALL, bg=BG_RESULTS, relief=tk.FLAT,
+            insertbackground=TEXT, width=34,
+            highlightthickness=1, highlightbackground=BTN_BORDER,
+        )
+        name_entry.grid(row=0, column=1, sticky="ew", **pad)
+
+        tk.Label(win, text="Description", font=FONT_LABEL, fg=TEXT_MUTED,
+                 bg=BG_SETTINGS).grid(row=1, column=0, sticky="nw", **pad)
+        desc_text = _placeholder_text(
+            win,
+            "e.g., Adapts identity to suit their audience — reads rooms instantly"
+            " and lies fluently, but may not know who they really are.",
+            font=FONT_SMALL, bg=BG_RESULTS, relief=tk.FLAT,
+            insertbackground=TEXT, width=34, height=3, wrap=tk.WORD,
+            highlightthickness=1, highlightbackground=BTN_BORDER,
+        )
+        desc_text.grid(row=1, column=1, sticky="ew", **pad)
+
+        err_lbl = tk.Label(win, text="", font=FONT_SMALL, fg="#c0392b", bg=BG_SETTINGS)
+        err_lbl.grid(row=2, column=0, columnspan=2, sticky="w", padx=14)
+
+        btn_row = tk.Frame(win, bg=BG_SETTINGS)
+        btn_row.grid(row=3, column=0, columnspan=2, sticky="e", padx=14, pady=(4, 10))
+
+        def _add():
+            name = ("" if name_entry._has_placeholder else name_entry.get()).strip()
+            if not name:
+                err_lbl.config(text="Name is required.")
+                return
+            aid = self._unique_id(name, self._archetype_vars)
+            desc = "" if desc_text._has_placeholder else desc_text.get("1.0", tk.END).strip()
+            item = {"id": aid, "name": name, "description": desc}
+            self._custom_archetypes.append(item)
+            var = tk.BooleanVar(value=True)
+            self._archetype_vars[aid] = var
+            cols = 5
+            row, col = divmod(self._arch_grid_count, cols)
+            tk.Checkbutton(
+                self._arch_grid, text=name, variable=var,
+                font=FONT_SMALL, bg=BG_SETTINGS, fg=TEXT,
+                activebackground=BG_SETTINGS, activeforeground=TEXT,
+                selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
+            ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
+            self._arch_grid_count += 1
+            win.destroy()
+
+        _flat_btn(btn_row, "Cancel", win.destroy).pack(side=tk.LEFT, padx=(0, 6))
+        _flat_btn(btn_row, "Add", _add, primary=True).pack(side=tk.LEFT)
+        win.focus_set()
+        name_entry.bind("<Return>", lambda _: _add())
+        win.wait_window()
+
+    def _open_add_emotion_dialog(self):
+        win = tk.Toplevel(self)
+        win.title("Add custom emotion")
+        win.configure(bg=BG_SETTINGS)
+        win.resizable(False, False)
+        win.transient(self)
+        win.grab_set()
+
+        pad = {"padx": 14, "pady": 6}
+        tk.Label(win, text="Name", font=FONT_LABEL, fg=TEXT_MUTED,
+                 bg=BG_SETTINGS).grid(row=0, column=0, sticky="w", **pad)
+        name_entry = _placeholder_entry(
+            win, "e.g., Shame",
+            font=FONT_SMALL, bg=BG_RESULTS, relief=tk.FLAT,
+            insertbackground=TEXT, width=34,
+            highlightthickness=1, highlightbackground=BTN_BORDER,
+        )
+        name_entry.grid(row=0, column=1, sticky="ew", **pad)
+
+        tk.Label(win, text="Description", font=FONT_LABEL, fg=TEXT_MUTED,
+                 bg=BG_SETTINGS).grid(row=1, column=0, sticky="nw", **pad)
+        desc_text = _placeholder_text(
+            win,
+            "e.g., Acute self-consciousness triggered by perceived failure or"
+            " exposure — the urge to hide, shrink, or disappear.",
+            font=FONT_SMALL, bg=BG_RESULTS, relief=tk.FLAT,
+            insertbackground=TEXT, width=34, height=3, wrap=tk.WORD,
+            highlightthickness=1, highlightbackground=BTN_BORDER,
+        )
+        desc_text.grid(row=1, column=1, sticky="ew", **pad)
+
+        err_lbl = tk.Label(win, text="", font=FONT_SMALL, fg="#c0392b", bg=BG_SETTINGS)
+        err_lbl.grid(row=2, column=0, columnspan=2, sticky="w", padx=14)
+
+        btn_row = tk.Frame(win, bg=BG_SETTINGS)
+        btn_row.grid(row=3, column=0, columnspan=2, sticky="e", padx=14, pady=(4, 10))
+
+        def _add():
+            name = ("" if name_entry._has_placeholder else name_entry.get()).strip()
+            if not name:
+                err_lbl.config(text="Name is required.")
+                return
+            eid = self._unique_id(name, self._emotion_vars)
+            desc = "" if desc_text._has_placeholder else desc_text.get("1.0", tk.END).strip()
+            item = {"id": eid, "name": name, "description": desc}
+            self._custom_emotions.append(item)
+            var = tk.BooleanVar(value=True)
+            self._emotion_vars[eid] = var
+            cols = 5
+            row, col = divmod(self._emot_grid_count, cols)
+            tk.Checkbutton(
+                self._emot_grid, text=name, variable=var,
+                font=FONT_SMALL, bg=BG_SETTINGS, fg=TEXT,
+                activebackground=BG_SETTINGS, activeforeground=TEXT,
+                selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
+            ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
+            self._emot_grid_count += 1
+            win.destroy()
+
+        _flat_btn(btn_row, "Cancel", win.destroy).pack(side=tk.LEFT, padx=(0, 6))
+        _flat_btn(btn_row, "Add", _add, primary=True).pack(side=tk.LEFT)
+        win.focus_set()
+        name_entry.bind("<Return>", lambda _: _add())
+        win.wait_window()
+
+    def _open_add_genre_dialog(self):
+        win = tk.Toplevel(self)
+        win.title("Add custom genre")
+        win.configure(bg=BG_SETTINGS)
+        win.resizable(False, False)
+        win.transient(self)
+        win.grab_set()
+
+        pad = {"padx": 14, "pady": 6}
+        tk.Label(win, text="Name", font=FONT_LABEL, fg=TEXT_MUTED,
+                 bg=BG_SETTINGS).grid(row=0, column=0, sticky="w", **pad)
+        name_entry = _placeholder_entry(
+            win, "e.g., Cli-Fi",
+            font=FONT_SMALL, bg=BG_RESULTS, relief=tk.FLAT,
+            insertbackground=TEXT, width=34,
+            highlightthickness=1, highlightbackground=BTN_BORDER,
+        )
+        name_entry.grid(row=0, column=1, sticky="ew", **pad)
+
+        tk.Label(win, text="Tropes", font=FONT_LABEL, fg=TEXT_MUTED,
+                 bg=BG_SETTINGS).grid(row=1, column=0, sticky="nw", **pad)
+        tk.Label(win, text="comma-separated\ndrives detection",
+                 font=FONT_SMALL, fg=TEXT_MUTED,
+                 bg=BG_SETTINGS, justify=tk.LEFT).grid(row=1, column=0, sticky="s", padx=14)
+        tropes_text = _placeholder_text(
+            win,
+            "e.g., dying earth, climate refugee, eco-terrorism, last forest, flooded city",
+            font=FONT_SMALL, bg=BG_RESULTS, relief=tk.FLAT,
+            insertbackground=TEXT, width=34, height=3, wrap=tk.WORD,
+            highlightthickness=1, highlightbackground=BTN_BORDER,
+        )
+        tropes_text.grid(row=1, column=1, sticky="ew", **pad)
+
+        tk.Label(win, text="Description", font=FONT_LABEL, fg=TEXT_MUTED,
+                 bg=BG_SETTINGS).grid(row=2, column=0, sticky="nw", **pad)
+        tk.Label(win, text="optional,\nnot sent to model",
+                 font=FONT_SMALL, fg=TEXT_MUTED,
+                 bg=BG_SETTINGS, justify=tk.LEFT).grid(row=2, column=0, sticky="s", padx=14)
+        desc_text = _placeholder_text(
+            win,
+            "e.g., Stories set against climate crisis or ecological collapse.",
+            font=FONT_SMALL, bg=BG_RESULTS, relief=tk.FLAT,
+            insertbackground=TEXT, width=34, height=3, wrap=tk.WORD,
+            highlightthickness=1, highlightbackground=BTN_BORDER,
+        )
+        desc_text.grid(row=2, column=1, sticky="ew", **pad)
+
+        err_lbl = tk.Label(win, text="", font=FONT_SMALL, fg="#c0392b", bg=BG_SETTINGS)
+        err_lbl.grid(row=3, column=0, columnspan=2, sticky="w", padx=14)
+
+        btn_row = tk.Frame(win, bg=BG_SETTINGS)
+        btn_row.grid(row=4, column=0, columnspan=2, sticky="e", padx=14, pady=(4, 10))
+
+        def _add():
+            name = ("" if name_entry._has_placeholder else name_entry.get()).strip()
+            if not name:
+                err_lbl.config(text="Name is required.")
+                return
+            if name in self._genre_vars:
+                err_lbl.config(text="A genre with this name already exists.")
+                return
+            raw_tropes = "" if tropes_text._has_placeholder else tropes_text.get("1.0", tk.END).strip()
+            tropes = [t.strip() for t in raw_tropes.split(",") if t.strip()]
+            desc = "" if desc_text._has_placeholder else desc_text.get("1.0", tk.END).strip()
+            item = {"name": name, "description": desc, "tropes": tropes}
+            self._custom_genres.append(item)
+            var = tk.BooleanVar(value=True)
+            self._genre_vars[name] = var
+            cols = 4
+            row, col = divmod(self._genre_grid_count, cols)
+            tk.Checkbutton(
+                self._genre_grid, text=name, variable=var,
+                font=FONT_SMALL, bg=BG_SETTINGS, fg=TEXT,
+                activebackground=BG_SETTINGS, activeforeground=TEXT,
+                selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
+            ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
+            self._genre_grid_count += 1
+            win.destroy()
+
+        _flat_btn(btn_row, "Cancel", win.destroy).pack(side=tk.LEFT, padx=(0, 6))
+        _flat_btn(btn_row, "Add", _add, primary=True).pack(side=tk.LEFT)
+        win.focus_set()
+        name_entry.bind("<Return>", lambda _: _add())
+        win.wait_window()
+
     def _build_arch_settings(self, parent) -> tk.Frame:
         panel = tk.Frame(parent, bg=BG_SETTINGS, padx=18, pady=12)
 
@@ -2651,6 +3038,12 @@ class App(tk.Tk):
         arch_hdr.pack(fill=tk.X, pady=(0, 6))
         tk.Label(arch_hdr, text="ARCHETYPES", font=FONT_LABEL,
                  fg=TEXT_MUTED, bg=BG_SETTINGS).pack(side=tk.LEFT)
+        tk.Button(
+            arch_hdr, text="+ add", font=FONT_SMALL, relief=tk.FLAT,
+            bg=BG_SETTINGS, fg=ACCENT, cursor="hand2", bd=0,
+            activebackground=BG_SETTINGS, activeforeground=ACCENT_HOV,
+            command=self._open_add_archetype_dialog,
+        ).pack(side=tk.LEFT, padx=(8, 0))
         for label, val in [("none", False), ("·", None), ("all", True)]:
             if val is None:
                 tk.Label(arch_hdr, text=label, font=FONT_SMALL,
@@ -2663,10 +3056,12 @@ class App(tk.Tk):
                     command=lambda v=val: [x.set(v) for x in self._archetype_vars.values()],
                 ).pack(side=tk.RIGHT, padx=(0 if label == "none" else 4, 0))
 
-        arch_grid = tk.Frame(panel, bg=BG_SETTINGS)
-        arch_grid.pack(fill=tk.X)
+        self._arch_grid = tk.Frame(panel, bg=BG_SETTINGS)
+        self._arch_grid.pack(fill=tk.X)
+        arch_grid = self._arch_grid
         cols = 5
-        for idx, a in enumerate(load_archetypes()):
+        _archetypes = load_archetypes()
+        for idx, a in enumerate(_archetypes):
             var = tk.BooleanVar(value=True)
             self._archetype_vars[a["id"]] = var
             row, col = divmod(idx, cols)
@@ -2676,6 +3071,7 @@ class App(tk.Tk):
                 activebackground=BG_SETTINGS, activeforeground=TEXT,
                 selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
             ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
+        self._arch_grid_count = len(_archetypes)
 
         tk.Frame(panel, bg=BORDER, height=1).pack(fill=tk.X, pady=(10, 10))
 
@@ -2710,6 +3106,12 @@ class App(tk.Tk):
         emot_hdr.pack(fill=tk.X, pady=(0, 6))
         tk.Label(emot_hdr, text="EMOTIONS", font=FONT_LABEL,
                  fg=TEXT_MUTED, bg=BG_SETTINGS).pack(side=tk.LEFT)
+        tk.Button(
+            emot_hdr, text="+ add", font=FONT_SMALL, relief=tk.FLAT,
+            bg=BG_SETTINGS, fg=ACCENT, cursor="hand2", bd=0,
+            activebackground=BG_SETTINGS, activeforeground=ACCENT_HOV,
+            command=self._open_add_emotion_dialog,
+        ).pack(side=tk.LEFT, padx=(8, 0))
         for label, val in [("none", False), ("\xb7", None), ("all", True)]:
             if val is None:
                 tk.Label(emot_hdr, text=label, font=FONT_SMALL,
@@ -2722,10 +3124,12 @@ class App(tk.Tk):
                     command=lambda v=val: [x.set(v) for x in self._emotion_vars.values()],
                 ).pack(side=tk.RIGHT, padx=(0 if label == "none" else 4, 0))
 
-        emot_grid = tk.Frame(panel, bg=BG_SETTINGS)
-        emot_grid.pack(fill=tk.X)
+        self._emot_grid = tk.Frame(panel, bg=BG_SETTINGS)
+        self._emot_grid.pack(fill=tk.X)
+        emot_grid = self._emot_grid
         cols = 5
-        for idx, e in enumerate(load_emotions()):
+        _emotions = load_emotions()
+        for idx, e in enumerate(_emotions):
             var = tk.BooleanVar(value=True)
             self._emotion_vars[e["id"]] = var
             row, col = divmod(idx, cols)
@@ -2735,6 +3139,7 @@ class App(tk.Tk):
                 activebackground=BG_SETTINGS, activeforeground=TEXT,
                 selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
             ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
+        self._emot_grid_count = len(_emotions)
 
         tk.Frame(panel, bg=BORDER, height=1).pack(fill=tk.X, pady=(10, 10))
 
@@ -2795,6 +3200,12 @@ class App(tk.Tk):
         genre_hdr.pack(fill=tk.X, pady=(0, 6))
         tk.Label(genre_hdr, text="GENRES", font=FONT_LABEL,
                  fg=TEXT_MUTED, bg=BG_SETTINGS).pack(side=tk.LEFT)
+        tk.Button(
+            genre_hdr, text="+ add", font=FONT_SMALL, relief=tk.FLAT,
+            bg=BG_SETTINGS, fg=ACCENT, cursor="hand2", bd=0,
+            activebackground=BG_SETTINGS, activeforeground=ACCENT_HOV,
+            command=self._open_add_genre_dialog,
+        ).pack(side=tk.LEFT, padx=(8, 0))
         for label, val in [("none", False), ("\xb7", None), ("all", True)]:
             if val is None:
                 tk.Label(genre_hdr, text=label, font=FONT_SMALL,
@@ -2807,10 +3218,12 @@ class App(tk.Tk):
                     command=lambda v=val: [x.set(v) for x in self._genre_vars.values()],
                 ).pack(side=tk.RIGHT, padx=(0 if label == "none" else 4, 0))
 
-        genre_grid = tk.Frame(panel, bg=BG_SETTINGS)
-        genre_grid.pack(fill=tk.X)
+        self._genre_grid = tk.Frame(panel, bg=BG_SETTINGS)
+        self._genre_grid.pack(fill=tk.X)
+        genre_grid = self._genre_grid
         cols = 4
-        for idx, g in enumerate(load_genres()):
+        _genres = load_genres()
+        for idx, g in enumerate(_genres):
             var = tk.BooleanVar(value=g["name"] != "Literary Fiction")
             self._genre_vars[g["name"]] = var
             row, col = divmod(idx, cols)
@@ -2820,6 +3233,7 @@ class App(tk.Tk):
                 activebackground=BG_SETTINGS, activeforeground=TEXT,
                 selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
             ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
+        self._genre_grid_count = len(_genres)
 
         return panel
 
@@ -3422,6 +3836,8 @@ class App(tk.Tk):
         if from_cache_only:
             cached = load_arch_cache(self._filepath)
             if cached is not None:
+                custom = cached.get("custom_archetypes", []) or self._infer_custom_from_cache("archetype", cached)
+                self._restore_custom_items("archetype", custom)
                 self._show_characters(cached["sheets"])
                 self._status_arch.config(
                     text=f"Cached {_fmt_cache_dt(cached['analyzed_at'])} · Analyze to refresh"
@@ -3488,12 +3904,13 @@ class App(tk.Tk):
                 model=model,
                 focal_characters=focal,
                 enabled_archetypes=enabled_arch,
+                extra_archetypes=self._custom_archetypes or None,
                 on_progress=lambda c, t: self.after(
                     0, self._status_arch.config,
                     {"text": f"Analyzing manuscript… {round(c/t*100)}%"},
                 ),
             )
-            save_arch_cache(self._filepath, sheets)
+            save_arch_cache(self._filepath, sheets, self._custom_archetypes or None)
             self.after(0, self._show_characters, sheets)
         except Exception as exc:
             self.after(0, self._show_error_arch, exc)
@@ -3504,6 +3921,8 @@ class App(tk.Tk):
         if from_cache_only:
             cached = load_emotion_cache(self._filepath)
             if cached is not None:
+                custom = cached.get("custom_emotions", []) or self._infer_custom_from_cache("emotion", cached)
+                self._restore_custom_items("emotion", custom)
                 self._show_emotion_results(cached["sheets"])
                 self._status_emot.config(
                     text=f"Cached {_fmt_cache_dt(cached['analyzed_at'])} · Analyze to refresh"
@@ -3536,12 +3955,13 @@ class App(tk.Tk):
                 model=model,
                 focal_characters=focal,
                 enabled_emotions=enabled_emot,
+                extra_emotions=self._custom_emotions or None,
                 on_progress=lambda c, t: self.after(
                     0, self._status_emot.config,
                     {"text": f"Analyzing emotions… {round(c/t*100)}%"},
                 ),
             )
-            save_emotion_cache(self._filepath, sheets)
+            save_emotion_cache(self._filepath, sheets, self._custom_emotions or None)
             self.after(0, self._show_emotion_results, sheets)
         except Exception as exc:
             self.after(0, self._show_error_emot, exc)
@@ -3688,8 +4108,10 @@ class App(tk.Tk):
             for (arch_id, _, _), sz in zip(top3, icon_sizes):
                 try:
                     import numpy as _np
-                    img = Image.open(ARCH_ICON_PATH(arch_id)).convert("RGB")
-                    arr = _np.array(img)
+                    _raw = Image.open(ARCH_ICON_PATH(arch_id)).convert("RGBA")
+                    _bg  = Image.new("RGBA", _raw.size, bg_rgb + (255,))
+                    img  = Image.alpha_composite(_bg, _raw).convert("RGB")
+                    arr  = _np.array(img)
                     white = (arr[:, :, 0] > 240) & (arr[:, :, 1] > 240) & (arr[:, :, 2] > 240)
                     arr[white] = bg_rgb
                     img = Image.fromarray(arr.astype(_np.uint8), "RGB")
@@ -3766,7 +4188,8 @@ class App(tk.Tk):
         radar_row = tk.Frame(body, bg=BG)
         radar_row.pack(anchor="w", pady=(10, 0))
 
-        radar = _make_emotion_radar_widget(radar_row, sheet)
+        radar = _make_emotion_radar_widget(radar_row, sheet,
+                                           extra_emotions=self._custom_emotions or None)
         if radar is not None:
             radar.pack(side=tk.LEFT)
 
@@ -3777,7 +4200,7 @@ class App(tk.Tk):
             emot_scores = [sc for _, _, sc in top3]
             icon_sizes  = _softmax_sizes(emot_scores, lo=52, hi=96)
             for (eid, ename, _), sz in zip(top3, icon_sizes):
-                icon_path = EMOTION_ICONS_DIR / f"{eid}.png"
+                icon_path = _emotion_icon_path(eid)
                 cell = tk.Frame(icons_strip, bg=BG)
                 cell.pack(side=tk.LEFT, padx=(0, 12), anchor="s")
                 try:
@@ -3940,6 +4363,8 @@ class App(tk.Tk):
         if from_cache_only:
             cached = load_genre_cache(self._filepath)
             if cached is not None:
+                custom = cached.get("custom_genres", []) or self._infer_custom_from_cache("genre", cached)
+                self._restore_custom_items("genre", custom)
                 self._show_genre_results(cached["results"])
                 self._status_genre.config(
                     text=f"Cached {_fmt_cache_dt(cached['analyzed_at'])} · Analyze to refresh"
@@ -3967,8 +4392,9 @@ class App(tk.Tk):
                     {"text": f"Analyzing genres… {round(c/t*100)}%"},
                 ),
                 enabled_genres=enabled_genres,
+                extra_genres=self._custom_genres or None,
             )
-            save_genre_cache(self._filepath, results)
+            save_genre_cache(self._filepath, results, self._custom_genres or None)
             self.after(0, self._show_genre_results, results)
         except Exception as exc:
             self.after(0, self._show_error_genre, exc)

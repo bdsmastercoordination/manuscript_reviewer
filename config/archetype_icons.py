@@ -24,12 +24,15 @@ from pathlib import Path
 ICON_DIR = Path(__file__).parent.parent / "assets" / "archeypes" / "individual"
 
 
+_CUSTOM_ICON = ICON_DIR / "custom.png"
+
+
 def ICON_PATH(arch_id: str) -> Path:
-    """Return the PNG path for an archetype ID (raises if missing)."""
+    """Return the icon path for an archetype ID, falling back to custom.jpg."""
     p = ICON_DIR / f"{arch_id}.png"
-    if not p.exists():
-        raise FileNotFoundError(f"No icon for archetype '{arch_id}': {p}")
-    return p
+    if p.exists():
+        return p
+    return _CUSTOM_ICON
 
 # ── 2-letter abbreviations (text fallback) ───────────────────────────────────
 

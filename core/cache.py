@@ -129,12 +129,17 @@ def _sheet_from_dict(d: dict) -> CharacterSheet:
     )
 
 
-def save_arch_cache(filepath: str, sheets: list[CharacterSheet]) -> None:
+def save_arch_cache(
+    filepath: str,
+    sheets: list[CharacterSheet],
+    custom_archetypes: list | None = None,
+) -> None:
     payload = {
-        "version":     1,
-        "filepath":    filepath,
-        "analyzed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "sheets":      [_sheet_to_dict(s) for s in sheets],
+        "version":          1,
+        "filepath":         filepath,
+        "analyzed_at":      datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "sheets":           [_sheet_to_dict(s) for s in sheets],
+        "custom_archetypes": custom_archetypes or [],
     }
     _cache_path(filepath, "archetypes").write_text(
         json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -149,6 +154,7 @@ def load_arch_cache(filepath: str) -> dict | None:
     try:
         payload = json.loads(p.read_text(encoding="utf-8"))
         payload["sheets"] = [_sheet_from_dict(s) for s in payload["sheets"]]
+        payload.setdefault("custom_archetypes", [])
         return payload
     except Exception:
         return None
@@ -156,12 +162,17 @@ def load_arch_cache(filepath: str) -> dict | None:
 
 # ── emotions ──────────────────────────────────────────────────────────────────
 
-def save_emotion_cache(filepath: str, sheets: list[CharacterSheet]) -> None:
+def save_emotion_cache(
+    filepath: str,
+    sheets: list[CharacterSheet],
+    custom_emotions: list | None = None,
+) -> None:
     payload = {
-        "version":     1,
-        "filepath":    filepath,
-        "analyzed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "sheets":      [_sheet_to_dict(s) for s in sheets],
+        "version":        1,
+        "filepath":       filepath,
+        "analyzed_at":    datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "sheets":         [_sheet_to_dict(s) for s in sheets],
+        "custom_emotions": custom_emotions or [],
     }
     _cache_path(filepath, "emotions").write_text(
         json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -176,6 +187,7 @@ def load_emotion_cache(filepath: str) -> dict | None:
     try:
         payload = json.loads(p.read_text(encoding="utf-8"))
         payload["sheets"] = [_sheet_from_dict(s) for s in payload["sheets"]]
+        payload.setdefault("custom_emotions", [])
         return payload
     except Exception:
         return None
@@ -242,12 +254,17 @@ def load_synopsis_cache(filepath: str) -> dict | None:
         return None
 
 
-def save_genre_cache(filepath: str, results: list) -> None:
+def save_genre_cache(
+    filepath: str,
+    results: list,
+    custom_genres: list | None = None,
+) -> None:
     payload = {
-        "version":     1,
-        "filepath":    filepath,
-        "analyzed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "results":     [_genre_result_to_dict(r) for r in results],
+        "version":      1,
+        "filepath":     filepath,
+        "analyzed_at":  datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "results":      [_genre_result_to_dict(r) for r in results],
+        "custom_genres": custom_genres or [],
     }
     _cache_path(filepath, "genres").write_text(
         json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
@@ -262,6 +279,7 @@ def load_genre_cache(filepath: str) -> dict | None:
     try:
         payload = json.loads(p.read_text(encoding="utf-8"))
         payload["results"] = [_genre_result_from_dict(r) for r in payload["results"]]
+        payload.setdefault("custom_genres", [])
         return payload
     except Exception:
         return None

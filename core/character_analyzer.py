@@ -712,9 +712,12 @@ async def _analyze_async(
     synopsis:           str,
     focal_characters:   list[str] | None = None,
     enabled_archetypes: list[str] | None = None,
+    extra_archetypes:   list[dict] | None = None,
     on_raw=None,
 ) -> tuple[list[CharacterSheet], TokenUsage]:
     all_archetypes = load_archetypes()
+    if extra_archetypes:
+        all_archetypes = all_archetypes + extra_archetypes
     archetypes = (
         [a for a in all_archetypes if a["id"] in enabled_archetypes]
         if enabled_archetypes is not None
@@ -779,6 +782,7 @@ def analyze_characters(
     on_progress=None,
     focal_characters:   list[str] | None = None,
     enabled_archetypes: list[str] | None = None,
+    extra_archetypes:   list[dict] | None = None,
     on_raw=None,
 ) -> tuple[list[CharacterSheet], TokenUsage]:
     """
@@ -786,6 +790,7 @@ def analyze_characters(
 
     focal_characters   — skip Pass 1 and use these names as the roster.
     enabled_archetypes — restrict scoring to these archetype IDs (None = all).
+    extra_archetypes   — additional archetype dicts (id, name, description) to include.
     on_progress(phase, current, total) — called after each API call.
     on_raw(phase, chunk_idx, chunk_text, raw_response) — called with every raw
         LLM response; useful for logging and prompt evaluation.
@@ -796,6 +801,6 @@ def analyze_characters(
     return asyncio.run(
         _analyze_async(
             text, model, roster_size, on_progress, synopsis,
-            focal_characters, enabled_archetypes, on_raw,
+            focal_characters, enabled_archetypes, extra_archetypes, on_raw,
         )
     )

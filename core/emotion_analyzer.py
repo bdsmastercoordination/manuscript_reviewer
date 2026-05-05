@@ -359,9 +359,12 @@ async def _analyze_async(
     synopsis: str,
     focal_characters: list[str] | None = None,
     enabled_emotions: list[str] | None = None,
+    extra_emotions:   list[dict] | None = None,
     on_raw=None,
 ) -> tuple[list[CharacterSheet], TokenUsage]:
     all_emotions = load_emotions()
+    if extra_emotions:
+        all_emotions = all_emotions + extra_emotions
     emotions = (
         [e for e in all_emotions if e["id"] in enabled_emotions]
         if enabled_emotions is not None
@@ -417,6 +420,7 @@ def analyze_emotions(
     on_progress=None,
     focal_characters: list[str] | None = None,
     enabled_emotions: list[str] | None = None,
+    extra_emotions:   list[dict] | None = None,
     on_raw=None,
 ) -> tuple[list[CharacterSheet], TokenUsage]:
     """
@@ -424,6 +428,7 @@ def analyze_emotions(
 
     focal_characters  -- skip Pass 1 and use these names as the roster.
     enabled_emotions  -- restrict scoring to these emotion IDs (None = all).
+    extra_emotions    -- additional emotion dicts (id, name, description) to include.
     on_progress(phase, current, total) -- called after each API call.
     """
     text = load_docx(filepath)
@@ -432,6 +437,6 @@ def analyze_emotions(
     return asyncio.run(
         _analyze_async(
             text, model, roster_size, on_progress, synopsis,
-            focal_characters, enabled_emotions, on_raw,
+            focal_characters, enabled_emotions, extra_emotions, on_raw,
         )
     )
