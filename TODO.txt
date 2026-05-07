@@ -1,4 +1,2 @@
-commit adding of custom elements
-personality panel with big 5 similar to emotions
 
 human in the loop scoring like in llm_annotate package (for each panel) which saves outputs

@@ -285,6 +285,39 @@ def load_genre_cache(filepath: str) -> dict | None:
         return None
 
 
+# ── personality ───────────────────────────────────────────────────────────────
+
+def save_personality_cache(
+    filepath: str,
+    sheets: list[CharacterSheet],
+    custom_traits: list | None = None,
+) -> None:
+    payload = {
+        "version":       1,
+        "filepath":      filepath,
+        "analyzed_at":   datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "sheets":        [_sheet_to_dict(s) for s in sheets],
+        "custom_traits": custom_traits or [],
+    }
+    _cache_path(filepath, "personality").write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+
+def load_personality_cache(filepath: str) -> dict | None:
+    """Return parsed cache dict or None if no valid cache exists."""
+    p = _cache_path(filepath, "personality")
+    if not p.exists():
+        return None
+    try:
+        payload = json.loads(p.read_text(encoding="utf-8"))
+        payload["sheets"] = [_sheet_from_dict(s) for s in payload["sheets"]]
+        payload.setdefault("custom_traits", [])
+        return payload
+    except Exception:
+        return None
+
+
 # ── opening ───────────────────────────────────────────────────────────────────
 
 def save_opening_cache(filepath: str, result) -> None:

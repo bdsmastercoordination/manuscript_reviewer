@@ -19,6 +19,7 @@ from core.docx_comments import annotate
 from core.prompts import load_error_types, load_style_config, save_style_config
 from core.character_analyzer import analyze_characters, load_archetypes, CharacterSheet
 from core.emotion_analyzer import analyze_emotions, load_emotions
+from core.personality_analyzer import analyze_personality, load_personality_traits
 from core.genre_analyzer import analyze_genres, GenreResult, load_genres
 from core.synopsis_analyzer import analyze_synopsis, SynopsisResult, PlotBeat
 from core.opening_analyzer import analyze_opening, OpeningResult, CHECKLIST_ITEMS, CONFIDENCE_EMOJI
@@ -27,6 +28,7 @@ from core.cache import (
     load_copyedit_cache, save_copyedit_cache,
     load_arch_cache, save_arch_cache,
     load_emotion_cache, save_emotion_cache,
+    load_personality_cache, save_personality_cache,
     load_genre_cache, save_genre_cache,
     load_synopsis_cache, save_synopsis_cache,
     load_opening_cache, save_opening_cache,
@@ -44,6 +46,21 @@ def _emotion_icon_path(eid: str) -> Path:
     if p.exists():
         return p
     return _EMOTION_CUSTOM_ICON
+
+
+PERSONALITY_ICONS_DIR = Path(__file__).parent / "assets" / "personalities" / "individual"
+_PERSONALITY_CUSTOM_ICON = PERSONALITY_ICONS_DIR / "custom.png"
+
+
+def _personality_icon_path(tid: str, score: float = 1.0) -> Path:
+    pole = "high" if score >= 0 else "low"
+    p = PERSONALITY_ICONS_DIR / f"{tid}_{pole}.png"
+    if p.exists():
+        return p
+    p2 = PERSONALITY_ICONS_DIR / f"{tid}.png"
+    if p2.exists():
+        return p2
+    return _PERSONALITY_CUSTOM_ICON
 
 
 # ── palette ───────────────────────────────────────────────────────────────────
@@ -77,6 +94,11 @@ MODELS = {
     "Haiku (fast)":  "claude-haiku-4-5-20251001",
     "Sonnet (best)": "claude-sonnet-4-6",
 }
+
+CHAR_COLORS = ["#c9a96e", "#4a7ebf", "#7ca87c", "#b86b6b", "#9b7ec8", "#c8a07c"]
+
+PLUTCHIK_ORDER = ["joy", "love", "fear", "surprise", "longing",
+                  "sadness", "disgust", "anger", "pride", "shame"]
 
 STYLE_LABELS = {
     "quotation_marks": "Quotation marks",
@@ -128,6 +150,49 @@ def _flat_btn(parent, text, command, primary=False, **kw):
     btn.bind("<Enter>", lambda _: btn.config(bg=hov))
     btn.bind("<Leave>", lambda _: btn.config(bg=bg))
     return btn
+
+
+def _make_group_toggle(parent, var, label_a, val_a, label_b, val_b, on_change=None):
+    """
+    Segmented pill toggle with two options.  Active side gets ACCENT background.
+    Returns the outer tk.Frame.
+    """
+    frame = tk.Frame(
+        parent, bg=BG_SETTINGS,
+        highlightthickness=1, highlightbackground=BORDER,
+    )
+
+    def _set(val):
+        var.set(val)
+        _refresh()
+        if on_change:
+            on_change()
+
+    lbl_a = tk.Label(frame, text=label_a, font=FONT_SMALL,
+                     padx=14, pady=5, cursor="hand2")
+    lbl_a.pack(side=tk.LEFT)
+    lbl_a.bind("<Button-1>", lambda _: _set(val_a))
+
+    tk.Frame(frame, width=1, bg=BORDER).pack(side=tk.LEFT, fill=tk.Y)
+
+    lbl_b = tk.Label(frame, text=label_b, font=FONT_SMALL,
+                     padx=14, pady=5, cursor="hand2")
+    lbl_b.pack(side=tk.LEFT)
+    lbl_b.bind("<Button-1>", lambda _: _set(val_b))
+
+    def _refresh():
+        mode = var.get()
+        lbl_a.config(
+            bg=ACCENT     if mode == val_a else BG_SETTINGS,
+            fg="#ffffff"  if mode == val_a else TEXT_MUTED,
+        )
+        lbl_b.config(
+            bg=ACCENT     if mode == val_b else BG_SETTINGS,
+            fg="#ffffff"  if mode == val_b else TEXT_MUTED,
+        )
+
+    _refresh()
+    return frame
 
 
 def _draw_arch_bars(canvas, archetypes, width):
@@ -777,6 +842,1331 @@ def _make_emotion_radar_widget(parent, sheet, extra_emotions=None) -> tk.Frame |
     return frame
 
 
+def _build_personality_fig(sheets, total_chunks=None):
+    """
+    Big Five personality trait time-series figure.
+    Plots every individual signal as a dot (clickable) and interpolates a line.
+    Returns (fig, marked) or (None, []).
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    chars = [s for s in sheets if s.signals_ordered]
+    if not chars:
+        return None, []
+
+    LINE_COLORS = ["#c9a96e", "#7c5c1e", "#d4956a"]
+
+    all_cidxs = [s["chunk_idx"] for sh in chars for s in sh.signals_ordered]
+    if total_chunks is None:
+        total_chunks = max(all_cidxs) + 1 if all_cidxs else 1
+
+    n = len(chars)
+    fig, axes = plt.subplots(n, 1, figsize=(9, max(2.4, n * 2.2)),
+                             facecolor=BG, squeeze=False)
+    axes  = axes[:, 0]
+    marked = []
+
+    for ax, sheet in zip(axes, chars):
+        pos_sigs = sheet.signals_ordered
+        ax_yvals = []
+        if not pos_sigs:
+            ax.text(0.5, 0.5, "no signal data", transform=ax.transAxes,
+                    ha="center", va="center", color="#bbb", fontsize=8)
+            continue
+
+        x_dense     = np.linspace(0, 100, total_chunks)
+        chunk_width = 100.0 / max(total_chunks - 1, 1)
+        margin      = chunk_width * 0.25
+        n_fine      = total_chunks * 4
+        x_fine      = np.linspace(0, 100, n_fine)
+        top3        = sheet.top_archetypes[:3]
+
+        ax.set_facecolor("#faf5ec")
+        any_line = False
+
+        for ci_color, (tid, tname, _) in enumerate(top3):
+            chunk_to_sigs: dict[int, list] = {}
+            for s in pos_sigs:
+                if abs(s["scores"].get(tid, 0.0)) < 0.5:
+                    continue
+                chunk_to_sigs.setdefault(s["chunk_idx"], []).append(s)
+            if not chunk_to_sigs:
+                continue
+
+            spread_data: list[tuple] = []
+            for ci_s in sorted(chunk_to_sigs):
+                c_sigs = sorted(chunk_to_sigs[ci_s], key=lambda s: s.get("offset", 50))
+                cx = float(x_dense[ci_s])
+                lo = max(0.0,   cx - chunk_width * 0.5 + margin)
+                hi = min(100.0, cx + chunk_width * 0.5 - margin)
+                for sig in c_sigs:
+                    off = sig.get("offset", 50) / 100.0
+                    xi  = lo + off * (hi - lo)
+                    spread_data.append((xi, ci_s, sig))
+
+            if not spread_data:
+                continue
+
+            xs_arr = np.array([d[0] for d in spread_data])
+            # use signed scores for y-axis (bipolar)
+            ys_arr = np.array([d[2]["scores"].get(tid, 0.0) for d in spread_data])
+
+            if np.max(np.abs(ys_arr)) < 0.1:
+                continue
+
+            net_fine = np.interp(x_fine, xs_arr, ys_arr,
+                                 left=ys_arr[0], right=ys_arr[-1])
+
+            first_ci = spread_data[0][1]
+            last_ci  = spread_data[-1][1]
+            x_start  = max(0.0,   float(x_dense[first_ci]) - chunk_width * 0.5)
+            x_end    = min(100.0, float(x_dense[last_ci])  + chunk_width * 0.5)
+            line_mask = (x_fine >= x_start) & (x_fine <= x_end)
+
+            col = LINE_COLORS[ci_color % len(LINE_COLORS)]
+            ax.plot(x_fine[line_mask], net_fine[line_mask], color=col, linewidth=1.8,
+                    label=tname, alpha=0.92, solid_capstyle="round", zorder=3)
+            ax_yvals.extend(net_fine[line_mask].tolist())
+            any_line = True
+
+            for xi, ci_s, sig in spread_data:
+                yi = float(np.interp(xi, x_fine, net_fine))
+                ax_yvals.append(yi)
+                ax.plot(xi, yi, "o", color=col, markersize=4.5,
+                        markeredgewidth=0.8, markeredgecolor="white", alpha=0.85, zorder=5)
+                marked.append(dict(ax=ax, x=xi, y=yi, aid=tid, aname=tname,
+                                   chunk_idx=ci_s, sheet=sheet, signal=sig))
+
+        if not any_line:
+            ax.text(0.5, 0.5, "no signal data", transform=ax.transAxes,
+                    ha="center", va="center", color="#bbb", fontsize=8)
+
+        # zero baseline for bipolar scale
+        ax.axhline(0, color=BORDER, linewidth=0.8, linestyle="--", alpha=0.6, zorder=1)
+
+        ax.set_xlim(-2, 102)
+        ax.set_xticks([0, 25, 50, 75, 100])
+        ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
+        if ax_yvals:
+            ylo = min(ax_yvals + [-0.2])
+            yhi = max(ax_yvals + [0.2])
+            pad = (yhi - ylo) * 0.15 or 0.3
+            ax.set_ylim(ylo - pad, yhi + pad)
+        ax.tick_params(labelsize=7, colors=TEXT_MUTED, length=2)
+        ax.set_xlabel("narrative progress", fontsize=6.5, color=TEXT_MUTED, labelpad=2)
+        ax.set_ylabel("← low  ·  high →", fontsize=6.5, color=TEXT_MUTED, labelpad=2)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        for spine in ("left", "bottom"):
+            ax.spines[spine].set_color(BORDER)
+
+        if any_line:
+            ax.legend(fontsize=6.5, loc="upper right", framealpha=0.8,
+                      facecolor=BG, edgecolor=BORDER, handlelength=1.4)
+        ax.set_title(sheet.name, fontsize=9, color=TEXT, loc="left", pad=4)
+
+    fig.tight_layout(pad=0.9, h_pad=1.4)
+    return fig, marked
+
+
+def _render_personality_plot(sheets):
+    """Render personality trait time-series to a PIL Image (for PDF embedding)."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from io import BytesIO
+        from PIL import Image as PILImage
+    except ImportError:
+        return None
+    fig, _ = _build_personality_fig(sheets)
+    if fig is None:
+        return None
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight", facecolor="#fdf9f6")
+    plt.close(fig)
+    buf.seek(0)
+    return PILImage.open(buf).copy()
+
+
+def _make_personality_plot_widget(parent, sheets, total_chunks=None):
+    """Interactive personality trait line-plot widget; clickable signal dots."""
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    except ImportError:
+        return None
+
+    fig, marked = _build_personality_fig(sheets, total_chunks=total_chunks)
+    if fig is None:
+        return None
+
+    frame     = tk.Frame(parent, bg=BG_RESULTS)
+    canvas    = FigureCanvasTkAgg(fig, master=frame)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+    tk_widget = canvas.get_tk_widget()
+
+    def _nearest(event):
+        if event.inaxes is None or event.xdata is None:
+            return None, float("inf")
+        ax   = event.inaxes
+        xlim = ax.get_xlim(); ylim = ax.get_ylim()
+        xr   = max(xlim[1] - xlim[0], 1); yr = max(ylim[1] - ylim[0], 1)
+        best, best_dist = None, float("inf")
+        for pt in marked:
+            if pt["ax"] is not ax:
+                continue
+            dist = (((event.xdata - pt["x"]) / xr) ** 2 +
+                    ((event.ydata - pt["y"]) / yr) ** 2) ** 0.5
+            if dist < best_dist:
+                best_dist, best = dist, pt
+        return best, best_dist
+
+    def on_motion(event):
+        best, best_dist = _nearest(event)
+        tk_widget.config(cursor="hand2" if best and best_dist < 0.01 else "")
+
+    def on_leave(event):
+        tk_widget.config(cursor="")
+
+    def _show_signal_popup(point):
+        sig   = point["signal"]
+        aid   = point["aid"]
+        popup = tk.Toplevel(parent)
+        popup.title(point["aname"])
+        popup.configure(bg=BG)
+        popup.resizable(False, False)
+        popup.transient(parent.winfo_toplevel())
+        popup.grab_set()
+        tk.Label(popup, text=f"{point['sheet'].name}  ·  {point['aname']}",
+                 font=FONT_LABEL, fg=TEXT, bg=BG).pack(padx=24, pady=(18, 6))
+        body = tk.Frame(popup, bg=BG)
+        body.pack(fill=tk.X, padx=24, pady=(0, 6))
+        tk.Label(body, text=sig.get("signal", ""), font=FONT_QUOTE, fg=TEXT, bg=BG,
+                 wraplength=400, justify=tk.LEFT, anchor="nw").pack(fill=tk.X)
+        tk.Frame(popup, height=1, bg=BORDER).pack(fill=tk.X, padx=24, pady=(8, 0))
+        _flat_btn(popup, "OK", popup.destroy, primary=True).pack(pady=(10, 18))
+        popup.update_idletasks()
+        pw, ph = popup.winfo_reqwidth(), popup.winfo_reqheight()
+        root   = parent.winfo_toplevel()
+        popup.geometry(f"+{root.winfo_rootx() + (root.winfo_width()  - pw) // 2}"
+                       f"+{root.winfo_rooty() + (root.winfo_height() - ph) // 2}")
+
+    def on_click(event):
+        best, best_dist = _nearest(event)
+        if best and best_dist < 0.01:
+            _show_signal_popup(best)
+
+    canvas.mpl_connect("motion_notify_event", on_motion)
+    canvas.mpl_connect("axes_leave_event",    on_leave)
+    canvas.mpl_connect("button_press_event",  on_click)
+    plt.close(fig)
+    return frame
+
+
+def _make_personality_radar_widget(parent, sheet, extra_traits=None) -> tk.Frame | None:
+    """
+    Render a polar radar chart for one character's Big Five profile.
+    Returns a tk.Frame or None on failure.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    except ImportError:
+        return None
+
+    traits = load_personality_traits()
+    if extra_traits:
+        known_ids = {t["id"] for t in traits}
+        traits = traits + [t for t in extra_traits if t["id"] not in known_ids]
+    if not traits:
+        return None
+
+    all_ids  = [t["id"] for t in traits]
+    # pole name per trait — shown when the character leans to that pole
+    high_names = [t.get("high_name", t["name"]) for t in traits]
+    low_names  = [t.get("low_name",  t["name"]) for t in traits]
+    N = len(traits)
+
+    totals = {tid: 0.0 for tid in all_ids}
+    T = sheet.total_signals or 1
+    for sig in sheet.signals_ordered:
+        for tid, score in sig.get("scores", {}).items():
+            if tid in totals:
+                totals[tid] += score
+    avg    = [totals[tid] / T for tid in all_ids]
+    # radar uses |avg| for spoke length; sign selects the pole label
+    abs_avg = [abs(v) for v in avg]
+    labels  = [
+        high_names[i] if avg[i] >= 0 else low_names[i]
+        for i in range(N)
+    ]
+    floor  = max(abs_avg) * 0.06 if max(abs_avg) > 0 else 0
+    values = [max(v, floor) for v in abs_avg]
+
+    if max(values) < 0.05:
+        return None
+
+    angles = [n / float(N) * 2 * 3.14159265 for n in range(N)]
+    v_plot = values + [values[0]]
+    a_plot = angles + [angles[0]]
+
+    FIG_BG = "#fdf9f6"
+    AX_BG  = "#faf5ec"
+    GOLD   = "#c9a96e"
+    BORD   = "#d4ba90"
+
+    fig, ax = plt.subplots(figsize=(3.4, 3.4), subplot_kw=dict(polar=True), facecolor=FIG_BG)
+    ax.set_facecolor(AX_BG)
+
+    max_v = max(values)
+    import numpy as np
+    ticks = np.linspace(0, max_v, 4)[1:]
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([])
+    ax.set_ylim(0, max_v * 1.15)
+    ax.yaxis.grid(color=BORD, linewidth=0.5, linestyle="--", alpha=0.7)
+    ax.xaxis.grid(color=BORD, linewidth=0.5, alpha=0.5)
+    ax.spines["polar"].set_color(BORD)
+
+    ax.fill(a_plot, v_plot, color=GOLD, alpha=0.22)
+    ax.plot(a_plot, v_plot, color=GOLD, linewidth=1.6)
+    ax.scatter(angles, values, color=GOLD, s=18, zorder=4, edgecolors="white", linewidths=0.8)
+    ax.set_xticks(angles)
+    ax.set_xticklabels(labels, fontsize=7.5, color="#111111")
+
+    fig.tight_layout(pad=0.3)
+
+    frame  = tk.Frame(parent, bg=BG)
+    canvas = FigureCanvasTkAgg(fig, master=frame)
+    canvas.draw()
+    canvas.get_tk_widget().pack()
+    plt.close(fig)
+    return frame
+
+
+def _make_combined_emotion_radar_widget(parent, sheets, extra_emotions=None) -> "tk.Frame | None":
+    """
+    Render a radar chart with all characters overlaid (one polygon per character).
+    Returns a tk.Frame or None on failure.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    except ImportError:
+        return None
+
+    chars = [s for s in sheets if s.signals_ordered]
+    if not chars:
+        return None
+
+    emotions = load_emotions()
+    if extra_emotions:
+        known_ids = {e["id"] for e in emotions}
+        emotions = emotions + [e for e in extra_emotions if e["id"] not in known_ids]
+    if not emotions:
+        return None
+
+    by_id   = {e["id"]: e for e in emotions}
+    ordered = [by_id[eid] for eid in PLUTCHIK_ORDER if eid in by_id]
+    ordered += [e for e in emotions if e["id"] not in PLUTCHIK_ORDER]
+
+    all_ids = [e["id"] for e in ordered]
+    labels  = [e["name"] for e in ordered]
+    N = len(ordered)
+    angles  = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
+
+    FIG_BG = "#fdf9f6"
+    AX_BG  = "#faf5ec"
+    BORD   = "#d4ba90"
+
+    fig, ax = plt.subplots(
+        figsize=(4.2, 4.2),
+        subplot_kw=dict(polar=True),
+        facecolor=FIG_BG,
+    )
+    ax.set_facecolor(AX_BG)
+
+    all_values = []
+    char_data  = []
+    for sheet in chars:
+        totals = {eid: 0.0 for eid in all_ids}
+        T = sheet.total_signals or 1
+        for sig in sheet.signals_ordered:
+            for eid, score in sig.get("scores", {}).items():
+                if eid in totals:
+                    totals[eid] += score
+        raw    = [totals[eid] / T for eid in all_ids]
+        floor  = max(raw) * 0.06 if max(raw) > 0 else 0
+        values = [max(v, floor) for v in raw]
+        all_values.extend(values)
+        char_data.append((sheet.name, values))
+
+    if not all_values or max(all_values) < 0.05:
+        plt.close(fig)
+        return None
+
+    max_v = max(all_values)
+    ticks = np.linspace(0, max_v, 4)[1:]
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([])
+    ax.set_ylim(0, max_v * 1.18)
+    ax.yaxis.grid(color=BORD, linewidth=0.5, linestyle="--", alpha=0.7)
+    ax.xaxis.grid(color=BORD, linewidth=0.5, alpha=0.5)
+    ax.spines["polar"].set_color(BORD)
+
+    for ci, (cname, values) in enumerate(char_data):
+        col    = CHAR_COLORS[ci % len(CHAR_COLORS)]
+        v_plot = values + [values[0]]
+        a_plot = angles + [angles[0]]
+        ax.fill(a_plot, v_plot, color=col, alpha=0.18)
+        ax.plot(a_plot, v_plot, color=col, linewidth=1.6, label=cname)
+        ax.scatter(angles, values, color=col, s=14, zorder=4, edgecolors="white", linewidths=0.6)
+
+    ax.set_xticks(angles)
+    ax.set_xticklabels(labels, fontsize=7.5, color="#111111")
+    ax.legend(fontsize=7, loc="upper right", bbox_to_anchor=(1.32, 1.15),
+              framealpha=0.85, facecolor=FIG_BG, edgecolor=BORD)
+
+    fig.tight_layout(pad=0.3)
+
+    frame  = tk.Frame(parent, bg=BG)
+    canvas = FigureCanvasTkAgg(fig, master=frame)
+    canvas.draw()
+    canvas.get_tk_widget().pack()
+    plt.close(fig)
+    return frame
+
+
+def _build_emotion_by_group_fig(sheets, total_chunks=None):
+    """
+    Emotion by-group time-series figure.
+    One subplot per emotion (top_archetypes[:3] across all characters).
+    One line per character, color-coded.
+    Returns (fig, marked) or (None, []).
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    chars = [s for s in sheets if s.signals_ordered]
+    if not chars:
+        return None, []
+
+    EMOTION_POS = {"joy", "love", "pride"}
+    EMOTION_NEG = {"sadness", "anger", "fear", "shame", "disgust"}
+
+    def _signal_sentiment(s: dict) -> float:
+        pos = [sc for eid, sc in s["scores"].items() if eid in EMOTION_POS]
+        neg = [sc for eid, sc in s["scores"].items() if eid in EMOTION_NEG]
+        return (sum(pos) / len(pos) if pos else 0.0) - (sum(neg) / len(neg) if neg else 0.0)
+
+    # Collect unique emotion IDs from top_archetypes[:3] across all chars
+    emotion_ids_ordered = []
+    seen = set()
+    for sheet in chars:
+        for aid, aname, _ in sheet.top_archetypes[:3]:
+            if aid not in seen:
+                seen.add(aid)
+                emotion_ids_ordered.append((aid, aname))
+
+    if not emotion_ids_ordered:
+        return None, []
+
+    all_cidxs = [s["chunk_idx"] for sh in chars for s in sh.signals_ordered]
+    if total_chunks is None:
+        total_chunks = max(all_cidxs) + 1 if all_cidxs else 1
+
+    n_emot = len(emotion_ids_ordered)
+    fig, axes = plt.subplots(n_emot, 1, figsize=(9, max(2.4, n_emot * 2.2)),
+                              facecolor=BG, squeeze=False)
+    axes  = axes[:, 0]
+    marked = []
+
+    x_dense     = np.linspace(0, 100, total_chunks)
+    chunk_width = 100.0 / max(total_chunks - 1, 1)
+    margin      = chunk_width * 0.25
+    n_fine      = total_chunks * 4
+    x_fine      = np.linspace(0, 100, n_fine)
+
+    for ax, (aid, aname) in zip(axes, emotion_ids_ordered):
+        ax.set_facecolor("#faf5ec")
+        ax.set_title(aname, fontsize=9, color=TEXT, loc="left", pad=4)
+        ax_yvals = []
+        any_line = False
+
+        for ci_char, sheet in enumerate(chars):
+            col    = CHAR_COLORS[ci_char % len(CHAR_COLORS)]
+            pos_sigs = sheet.signals_ordered
+
+            # Chunk sentiment for smoothing
+            _by_chunk: dict[int, list] = {}
+            for s in pos_sigs:
+                _by_chunk.setdefault(s["chunk_idx"], []).append(s)
+            chunk_sentiment: dict[int, float] = {
+                ci_s: float(np.mean([_signal_sentiment(s) for s in sigs]))
+                for ci_s, sigs in _by_chunk.items()
+            }
+
+            chunk_to_sigs: dict[int, list] = {}
+            for s in pos_sigs:
+                if s["scores"].get(aid, 0.0) < 0.5:
+                    continue
+                chunk_to_sigs.setdefault(s["chunk_idx"], []).append(s)
+            if not chunk_to_sigs:
+                continue
+
+            spread_data: list[tuple] = []
+            for ci_s in sorted(chunk_to_sigs):
+                c_sigs = sorted(chunk_to_sigs[ci_s], key=lambda s: s.get("offset", 50))
+                cx = float(x_dense[ci_s])
+                lo = max(0.0,   cx - chunk_width * 0.5 + margin)
+                hi = min(100.0, cx + chunk_width * 0.5 - margin)
+                for sig in c_sigs:
+                    off = sig.get("offset", 50) / 100.0
+                    xi  = lo + off * (hi - lo)
+                    spread_data.append((xi, ci_s, sig))
+
+            xs_arr = np.array([d[0] for d in spread_data])
+            ys_arr = np.array([d[2]["scores"].get(aid, 0.0) for d in spread_data])
+            n_sig  = len(ys_arr)
+            ys_smooth = np.array([
+                0.6 * ys_arr[i]
+                + 0.1 * ys_arr[max(0, i - 1)]
+                + 0.1 * ys_arr[min(n_sig - 1, i + 1)]
+                + 0.2 * chunk_sentiment.get(spread_data[i][1], 0.0)
+                for i in range(n_sig)
+            ])
+
+            if np.abs(ys_smooth).max() < 0.1:
+                continue
+
+            net_fine = np.interp(x_fine, xs_arr, ys_smooth,
+                                 left=ys_smooth[0], right=ys_smooth[-1])
+
+            first_ci  = spread_data[0][1]
+            last_ci   = spread_data[-1][1]
+            x_start   = max(0.0,   float(x_dense[first_ci]) - chunk_width * 0.5)
+            x_end     = min(100.0, float(x_dense[last_ci])  + chunk_width * 0.5)
+            line_mask = (x_fine >= x_start) & (x_fine <= x_end)
+
+            ax.plot(x_fine[line_mask], net_fine[line_mask], color=col, linewidth=1.8,
+                    label=sheet.name, alpha=0.92, solid_capstyle="round", zorder=3)
+            ax_yvals.extend(net_fine[line_mask].tolist())
+            any_line = True
+
+            for xi, ci_s, sig in spread_data:
+                yi = float(np.interp(xi, x_fine, net_fine))
+                ax_yvals.append(yi)
+                ax.plot(xi, yi, "o", color=col, markersize=4.5,
+                        markeredgewidth=0.8, markeredgecolor="white", alpha=0.85, zorder=5)
+                marked.append(dict(ax=ax, x=xi, y=yi, aid=aid, aname=aname,
+                                   chunk_idx=ci_s, sheet=sheet, signal=sig))
+
+        if not any_line:
+            ax.text(0.5, 0.5, "no signal data", transform=ax.transAxes,
+                    ha="center", va="center", color="#bbb", fontsize=8)
+
+        ax.set_xlim(-2, 102)
+        ax.set_xticks([0, 25, 50, 75, 100])
+        ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
+        if ax_yvals:
+            ax.set_ylim(min(ax_yvals) - 0.5, max(ax_yvals) + 0.5)
+        ax.tick_params(labelsize=7, colors=TEXT_MUTED, length=2)
+        ax.set_xlabel("narrative progress", fontsize=6.5, color=TEXT_MUTED, labelpad=2)
+        ax.set_ylabel("Emotion", fontsize=6.5, color=TEXT_MUTED, labelpad=2)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        for spine in ("left", "bottom"):
+            ax.spines[spine].set_color(BORDER)
+        if any_line:
+            ax.legend(fontsize=6.5, loc="upper right", framealpha=0.8,
+                      facecolor=BG, edgecolor=BORDER, handlelength=1.4)
+
+    fig.tight_layout(pad=0.9, h_pad=1.4)
+    return fig, marked
+
+
+def _make_emotion_by_group_plot_widget(parent, sheets, total_chunks=None):
+    """Interactive by-group emotion line-plot widget."""
+    try:
+        import numpy as np
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    except ImportError:
+        return None
+
+    fig, marked = _build_emotion_by_group_fig(sheets, total_chunks=total_chunks)
+    if fig is None:
+        return None
+
+    frame     = tk.Frame(parent, bg=BG_RESULTS)
+    canvas    = FigureCanvasTkAgg(fig, master=frame)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+    tk_widget = canvas.get_tk_widget()
+
+    def _nearest(event):
+        if event.inaxes is None or event.xdata is None:
+            return None, float("inf")
+        ax   = event.inaxes
+        xlim = ax.get_xlim(); ylim = ax.get_ylim()
+        xr   = max(xlim[1] - xlim[0], 1); yr = max(ylim[1] - ylim[0], 1)
+        best, best_dist = None, float("inf")
+        for pt in marked:
+            if pt["ax"] is not ax:
+                continue
+            dist = (((event.xdata - pt["x"]) / xr) ** 2 +
+                    ((event.ydata - pt["y"]) / yr) ** 2) ** 0.5
+            if dist < best_dist:
+                best_dist, best = dist, pt
+        return best, best_dist
+
+    def on_motion(event):
+        best, best_dist = _nearest(event)
+        tk_widget.config(cursor="hand2" if best and best_dist < 0.01 else "")
+
+    def on_leave(event):
+        tk_widget.config(cursor="")
+
+    def _show_signal_popup(point):
+        sig   = point["signal"]
+        aid   = point["aid"]
+        popup = tk.Toplevel(parent)
+        popup.title(point["aname"])
+        popup.configure(bg=BG)
+        popup.resizable(False, False)
+        popup.transient(parent.winfo_toplevel())
+        popup.grab_set()
+        tk.Label(popup, text=f"{point['sheet'].name}  ·  {point['aname']}",
+                 font=FONT_LABEL, fg=TEXT, bg=BG).pack(padx=24, pady=(18, 6))
+        body = tk.Frame(popup, bg=BG)
+        body.pack(fill=tk.X, padx=24, pady=(0, 6))
+        tk.Label(body, text=sig.get("signal", ""), font=FONT_QUOTE, fg=TEXT, bg=BG,
+                 wraplength=400, justify=tk.LEFT, anchor="nw").pack(fill=tk.X, expand=True)
+        tk.Frame(popup, height=1, bg=BORDER).pack(fill=tk.X, padx=24, pady=(8, 0))
+        _flat_btn(popup, "OK", popup.destroy, primary=True).pack(pady=(10, 18))
+        popup.update_idletasks()
+        pw, ph = popup.winfo_reqwidth(), popup.winfo_reqheight()
+        root   = parent.winfo_toplevel()
+        popup.geometry(f"+{root.winfo_rootx() + (root.winfo_width()  - pw) // 2}"
+                       f"+{root.winfo_rooty() + (root.winfo_height() - ph) // 2}")
+
+    def on_click(event):
+        best, best_dist = _nearest(event)
+        if best and best_dist < 0.01:
+            _show_signal_popup(best)
+
+    canvas.mpl_connect("motion_notify_event", on_motion)
+    canvas.mpl_connect("axes_leave_event",    on_leave)
+    canvas.mpl_connect("button_press_event",  on_click)
+    plt.close(fig)
+    return frame
+
+
+def _render_emotion_by_group_plot(sheets):
+    """Render by-group emotion time-series to a PIL Image (for PDF embedding)."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from io import BytesIO
+        from PIL import Image as PILImage
+    except ImportError:
+        return None
+    fig, _ = _build_emotion_by_group_fig(sheets)
+    if fig is None:
+        return None
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight", facecolor="#fdf9f6")
+    plt.close(fig)
+    buf.seek(0)
+    return PILImage.open(buf).copy()
+
+
+def _make_combined_personality_radar_widget(parent, sheets, extra_traits=None) -> "tk.Frame | None":
+    """
+    Render a radar chart with all characters overlaid (one polygon per character).
+    Uses |avg| for spoke length, dimension name for labels.
+    Returns a tk.Frame or None on failure.
+    """
+    try:
+        import matplotlib.pyplot as plt
+        import numpy as np
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    except ImportError:
+        return None
+
+    chars = [s for s in sheets if s.signals_ordered]
+    if not chars:
+        return None
+
+    traits = load_personality_traits()
+    if extra_traits:
+        known_ids = {t["id"] for t in traits}
+        traits = traits + [t for t in extra_traits if t["id"] not in known_ids]
+    if not traits:
+        return None
+
+    all_ids = [t["id"] for t in traits]
+    labels  = [t["name"] for t in traits]
+    N = len(traits)
+    angles  = [n / float(N) * 2 * 3.14159265 for n in range(N)]
+
+    FIG_BG = "#fdf9f6"
+    AX_BG  = "#faf5ec"
+    BORD   = "#d4ba90"
+
+    fig, ax = plt.subplots(figsize=(4.2, 4.2), subplot_kw=dict(polar=True), facecolor=FIG_BG)
+    ax.set_facecolor(AX_BG)
+
+    all_values = []
+    char_data  = []
+    for sheet in chars:
+        totals = {tid: 0.0 for tid in all_ids}
+        T = sheet.total_signals or 1
+        for sig in sheet.signals_ordered:
+            for tid, score in sig.get("scores", {}).items():
+                if tid in totals:
+                    totals[tid] += score
+        avg     = [totals[tid] / T for tid in all_ids]
+        abs_avg = [abs(v) for v in avg]
+        floor   = max(abs_avg) * 0.06 if max(abs_avg) > 0 else 0
+        values  = [max(v, floor) for v in abs_avg]
+        all_values.extend(values)
+        char_data.append((sheet.name, values))
+
+    if not all_values or max(all_values) < 0.05:
+        plt.close(fig)
+        return None
+
+    import numpy as np
+    max_v = max(all_values)
+    ticks = np.linspace(0, max_v, 4)[1:]
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([])
+    ax.set_ylim(0, max_v * 1.18)
+    ax.yaxis.grid(color=BORD, linewidth=0.5, linestyle="--", alpha=0.7)
+    ax.xaxis.grid(color=BORD, linewidth=0.5, alpha=0.5)
+    ax.spines["polar"].set_color(BORD)
+
+    for ci, (cname, values) in enumerate(char_data):
+        col    = CHAR_COLORS[ci % len(CHAR_COLORS)]
+        v_plot = values + [values[0]]
+        a_plot = angles + [angles[0]]
+        ax.fill(a_plot, v_plot, color=col, alpha=0.18)
+        ax.plot(a_plot, v_plot, color=col, linewidth=1.6, label=cname)
+        ax.scatter(angles, values, color=col, s=14, zorder=4, edgecolors="white", linewidths=0.6)
+
+    ax.set_xticks(angles)
+    ax.set_xticklabels(labels, fontsize=7.5, color="#111111")
+    ax.legend(fontsize=7, loc="upper right", bbox_to_anchor=(1.32, 1.15),
+              framealpha=0.85, facecolor=FIG_BG, edgecolor=BORD)
+
+    fig.tight_layout(pad=0.3)
+
+    frame  = tk.Frame(parent, bg=BG)
+    canvas = FigureCanvasTkAgg(fig, master=frame)
+    canvas.draw()
+    canvas.get_tk_widget().pack()
+    plt.close(fig)
+    return frame
+
+
+def _build_personality_by_group_fig(sheets, total_chunks=None):
+    """
+    Personality by-group time-series figure.
+    One subplot per trait (top_archetypes[:3] across all characters).
+    One line per character, signed y-values, zero baseline.
+    Returns (fig, marked) or (None, []).
+    """
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    chars = [s for s in sheets if s.signals_ordered]
+    if not chars:
+        return None, []
+
+    # Collect unique trait IDs from top_archetypes[:3] across all chars
+    trait_ids_ordered = []
+    seen = set()
+    for sheet in chars:
+        for tid, tname, _ in sheet.top_archetypes[:3]:
+            if tid not in seen:
+                seen.add(tid)
+                trait_ids_ordered.append((tid, tname))
+
+    if not trait_ids_ordered:
+        return None, []
+
+    all_cidxs = [s["chunk_idx"] for sh in chars for s in sh.signals_ordered]
+    if total_chunks is None:
+        total_chunks = max(all_cidxs) + 1 if all_cidxs else 1
+
+    n_trait = len(trait_ids_ordered)
+    fig, axes = plt.subplots(n_trait, 1, figsize=(9, max(2.4, n_trait * 2.2)),
+                              facecolor=BG, squeeze=False)
+    axes  = axes[:, 0]
+    marked = []
+
+    x_dense     = np.linspace(0, 100, total_chunks)
+    chunk_width = 100.0 / max(total_chunks - 1, 1)
+    margin      = chunk_width * 0.25
+    n_fine      = total_chunks * 4
+    x_fine      = np.linspace(0, 100, n_fine)
+
+    for ax, (tid, tname) in zip(axes, trait_ids_ordered):
+        ax.set_facecolor("#faf5ec")
+        ax.set_title(tname, fontsize=9, color=TEXT, loc="left", pad=4)
+        ax_yvals = []
+        any_line = False
+
+        for ci_char, sheet in enumerate(chars):
+            col      = CHAR_COLORS[ci_char % len(CHAR_COLORS)]
+            pos_sigs = sheet.signals_ordered
+
+            chunk_to_sigs: dict[int, list] = {}
+            for s in pos_sigs:
+                if abs(s["scores"].get(tid, 0.0)) < 0.5:
+                    continue
+                chunk_to_sigs.setdefault(s["chunk_idx"], []).append(s)
+            if not chunk_to_sigs:
+                continue
+
+            spread_data: list[tuple] = []
+            for ci_s in sorted(chunk_to_sigs):
+                c_sigs = sorted(chunk_to_sigs[ci_s], key=lambda s: s.get("offset", 50))
+                cx = float(x_dense[ci_s])
+                lo = max(0.0,   cx - chunk_width * 0.5 + margin)
+                hi = min(100.0, cx + chunk_width * 0.5 - margin)
+                for sig in c_sigs:
+                    off = sig.get("offset", 50) / 100.0
+                    xi  = lo + off * (hi - lo)
+                    spread_data.append((xi, ci_s, sig))
+
+            if not spread_data:
+                continue
+
+            xs_arr = np.array([d[0] for d in spread_data])
+            ys_arr = np.array([d[2]["scores"].get(tid, 0.0) for d in spread_data])
+
+            if np.max(np.abs(ys_arr)) < 0.1:
+                continue
+
+            net_fine = np.interp(x_fine, xs_arr, ys_arr,
+                                 left=ys_arr[0], right=ys_arr[-1])
+
+            first_ci  = spread_data[0][1]
+            last_ci   = spread_data[-1][1]
+            x_start   = max(0.0,   float(x_dense[first_ci]) - chunk_width * 0.5)
+            x_end     = min(100.0, float(x_dense[last_ci])  + chunk_width * 0.5)
+            line_mask = (x_fine >= x_start) & (x_fine <= x_end)
+
+            ax.plot(x_fine[line_mask], net_fine[line_mask], color=col, linewidth=1.8,
+                    label=sheet.name, alpha=0.92, solid_capstyle="round", zorder=3)
+            ax_yvals.extend(net_fine[line_mask].tolist())
+            any_line = True
+
+            for xi, ci_s, sig in spread_data:
+                yi = float(np.interp(xi, x_fine, net_fine))
+                ax_yvals.append(yi)
+                ax.plot(xi, yi, "o", color=col, markersize=4.5,
+                        markeredgewidth=0.8, markeredgecolor="white", alpha=0.85, zorder=5)
+                marked.append(dict(ax=ax, x=xi, y=yi, aid=tid, aname=tname,
+                                   chunk_idx=ci_s, sheet=sheet, signal=sig))
+
+        if not any_line:
+            ax.text(0.5, 0.5, "no signal data", transform=ax.transAxes,
+                    ha="center", va="center", color="#bbb", fontsize=8)
+
+        ax.axhline(0, color=BORDER, linewidth=0.8, linestyle="--", alpha=0.6, zorder=1)
+        ax.set_xlim(-2, 102)
+        ax.set_xticks([0, 25, 50, 75, 100])
+        ax.set_xticklabels(["0%", "25%", "50%", "75%", "100%"])
+        if ax_yvals:
+            ylo = min(ax_yvals + [-0.2])
+            yhi = max(ax_yvals + [0.2])
+            pad = (yhi - ylo) * 0.15 or 0.3
+            ax.set_ylim(ylo - pad, yhi + pad)
+        ax.tick_params(labelsize=7, colors=TEXT_MUTED, length=2)
+        ax.set_xlabel("narrative progress", fontsize=6.5, color=TEXT_MUTED, labelpad=2)
+        ax.set_ylabel("← low  ·  high →", fontsize=6.5, color=TEXT_MUTED, labelpad=2)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        for spine in ("left", "bottom"):
+            ax.spines[spine].set_color(BORDER)
+        if any_line:
+            ax.legend(fontsize=6.5, loc="upper right", framealpha=0.8,
+                      facecolor=BG, edgecolor=BORDER, handlelength=1.4)
+
+    fig.tight_layout(pad=0.9, h_pad=1.4)
+    return fig, marked
+
+
+def _make_personality_by_group_plot_widget(parent, sheets, total_chunks=None):
+    """Interactive by-group personality trait line-plot widget."""
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    except ImportError:
+        return None
+
+    fig, marked = _build_personality_by_group_fig(sheets, total_chunks=total_chunks)
+    if fig is None:
+        return None
+
+    frame     = tk.Frame(parent, bg=BG_RESULTS)
+    canvas    = FigureCanvasTkAgg(fig, master=frame)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+    tk_widget = canvas.get_tk_widget()
+
+    def _nearest(event):
+        if event.inaxes is None or event.xdata is None:
+            return None, float("inf")
+        ax   = event.inaxes
+        xlim = ax.get_xlim(); ylim = ax.get_ylim()
+        xr   = max(xlim[1] - xlim[0], 1); yr = max(ylim[1] - ylim[0], 1)
+        best, best_dist = None, float("inf")
+        for pt in marked:
+            if pt["ax"] is not ax:
+                continue
+            dist = (((event.xdata - pt["x"]) / xr) ** 2 +
+                    ((event.ydata - pt["y"]) / yr) ** 2) ** 0.5
+            if dist < best_dist:
+                best_dist, best = dist, pt
+        return best, best_dist
+
+    def on_motion(event):
+        best, best_dist = _nearest(event)
+        tk_widget.config(cursor="hand2" if best and best_dist < 0.01 else "")
+
+    def on_leave(event):
+        tk_widget.config(cursor="")
+
+    def _show_signal_popup(point):
+        sig   = point["signal"]
+        aid   = point["aid"]
+        popup = tk.Toplevel(parent)
+        popup.title(point["aname"])
+        popup.configure(bg=BG)
+        popup.resizable(False, False)
+        popup.transient(parent.winfo_toplevel())
+        popup.grab_set()
+        tk.Label(popup, text=f"{point['sheet'].name}  ·  {point['aname']}",
+                 font=FONT_LABEL, fg=TEXT, bg=BG).pack(padx=24, pady=(18, 6))
+        body = tk.Frame(popup, bg=BG)
+        body.pack(fill=tk.X, padx=24, pady=(0, 6))
+        tk.Label(body, text=sig.get("signal", ""), font=FONT_QUOTE, fg=TEXT, bg=BG,
+                 wraplength=400, justify=tk.LEFT, anchor="nw").pack(fill=tk.X)
+        tk.Frame(popup, height=1, bg=BORDER).pack(fill=tk.X, padx=24, pady=(8, 0))
+        _flat_btn(popup, "OK", popup.destroy, primary=True).pack(pady=(10, 18))
+        popup.update_idletasks()
+        pw, ph = popup.winfo_reqwidth(), popup.winfo_reqheight()
+        root   = parent.winfo_toplevel()
+        popup.geometry(f"+{root.winfo_rootx() + (root.winfo_width()  - pw) // 2}"
+                       f"+{root.winfo_rooty() + (root.winfo_height() - ph) // 2}")
+
+    def on_click(event):
+        best, best_dist = _nearest(event)
+        if best and best_dist < 0.01:
+            _show_signal_popup(best)
+
+    canvas.mpl_connect("motion_notify_event", on_motion)
+    canvas.mpl_connect("axes_leave_event",    on_leave)
+    canvas.mpl_connect("button_press_event",  on_click)
+    plt.close(fig)
+    return frame
+
+
+def _render_personality_by_group_plot(sheets):
+    """Render by-group personality trait time-series to a PIL Image (for PDF embedding)."""
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from io import BytesIO
+        from PIL import Image as PILImage
+    except ImportError:
+        return None
+    fig, _ = _build_personality_by_group_fig(sheets)
+    if fig is None:
+        return None
+    buf = BytesIO()
+    fig.savefig(buf, format="png", dpi=130, bbox_inches="tight", facecolor="#fdf9f6")
+    plt.close(fig)
+    buf.seek(0)
+    return PILImage.open(buf).copy()
+
+
+def _write_personality_report(path: str, title: str, sheets, group_by: str = "character") -> None:
+    from datetime import date
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib.colors import HexColor, white
+    from reportlab.pdfgen.canvas import Canvas as PDFCanvas
+    from reportlab.lib.utils import simpleSplit
+
+    C_BG      = HexColor("#fdf9f6")
+    C_ACCENT  = HexColor("#c9a96e")
+    C_ACCENT2 = HexColor("#b8954e")
+    C_BAR_BG  = HexColor("#ede0c8")
+    C_TEXT    = HexColor("#111111")
+    C_MUTED   = HexColor("#6b7280")
+    C_BLUE    = HexColor("#1e40af")
+    C_BORDER  = HexColor("#d4ba90")
+    C_WHITE   = white
+
+    W, H = A4
+    MARGIN    = 20 * mm
+    CONTENT_W = W - 2 * MARGIN
+    BAND_H    = 18 * mm
+    FOOTER_H  = 10 * mm
+    TOP_Y     = H - BAND_H - 6 * mm
+
+    logo_path = str(ICON_PATH)
+    logo_size = 13 * mm
+    page_num  = [0]
+
+    c = PDFCanvas(path, pagesize=A4)
+    c.setTitle(f"Mirror — {title} — Personality Analysis")
+
+    # pole-name lookup for bipolar display
+    from core.personality_analyzer import load_personality_traits as _lpt
+    _pole_map_pdf = {
+        t["id"]: (t.get("high_name", t["name"]), t.get("low_name", t["name"]))
+        for t in _lpt()
+    }
+
+    def _draw_page_chrome():
+        page_num[0] += 1
+        c.setFillColor(C_BG)
+        c.rect(0, 0, W, H, fill=1, stroke=0)
+        c.setFillColor(C_ACCENT)
+        c.rect(0, H - BAND_H, W, BAND_H, fill=1, stroke=0)
+        c.setStrokeColor(C_ACCENT2)
+        c.setLineWidth(1)
+        c.line(0, H - BAND_H, W, H - BAND_H)
+
+        band_mid_y = H - BAND_H + (BAND_H - 5 * mm) / 2
+        c.setFont("Helvetica-Bold", 14)
+        c.setFillColor(C_WHITE)
+        c.drawString(MARGIN, band_mid_y, "Personality Analysis")
+
+        try:
+            logo_x = W - MARGIN - logo_size
+            logo_y = H - BAND_H + (BAND_H - logo_size) / 2
+            c.drawImage(logo_path, logo_x, logo_y, width=logo_size, height=logo_size, mask="auto")
+        except Exception:
+            pass
+
+        c.setFont("Helvetica", 8)
+        c.setFillColor(C_MUTED)
+        c.drawCentredString(W / 2, FOOTER_H / 2, f"Mirror · {page_num[0]}")
+
+    def new_page():
+        c.showPage()
+        _draw_page_chrome()
+
+    def ensure_space(y, needed):
+        if y - needed < FOOTER_H + 4 * mm:
+            new_page()
+            return TOP_Y
+        return y
+
+    _draw_page_chrome()
+    y = TOP_Y
+
+    c.setFont("Helvetica", 10)
+    c.setFillColor(C_MUTED)
+    c.drawRightString(W - MARGIN, y, title)
+    y -= 5 * mm
+    c.setFont("Helvetica", 9)
+    c.drawRightString(W - MARGIN, y, date.today().strftime("%d %B %Y"))
+    y -= 3 * mm
+    c.setStrokeColor(C_BORDER)
+    c.setLineWidth(0.5)
+    c.line(MARGIN, y, W - MARGIN, y)
+    y -= 8 * mm
+
+    if group_by == "trait":
+        # ── By-Trait view: combined radar + by-trait sections ──────────────────
+        from io import BytesIO as _BIO
+        from reportlab.lib.utils import ImageReader as _IR
+        import matplotlib
+        matplotlib.use("Agg")
+
+        # Render combined radar
+        _radar_img = None
+        try:
+            import matplotlib.pyplot as _plt
+            import numpy as _np
+
+            traits = load_personality_traits()
+            all_ids   = [t["id"] for t in traits]
+            labels_r  = [t["name"] for t in traits]
+            N_r = len(traits)
+            angles_r = [n / float(N_r) * 2 * 3.14159265 for n in range(N_r)]
+
+            fig_r, ax_r = _plt.subplots(figsize=(5, 5), subplot_kw=dict(polar=True), facecolor="#fdf9f6")
+            ax_r.set_facecolor("#faf5ec")
+            all_vals_r = []
+            char_data_r = []
+            for sheet in sheets:
+                totals = {tid: 0.0 for tid in all_ids}
+                T = sheet.total_signals or 1
+                for sig in sheet.signals_ordered:
+                    for tid, score in sig.get("scores", {}).items():
+                        if tid in totals:
+                            totals[tid] += score
+                avg     = [totals[tid] / T for tid in all_ids]
+                abs_avg = [abs(v) for v in avg]
+                floor   = max(abs_avg) * 0.06 if max(abs_avg) > 0 else 0
+                vals    = [max(v, floor) for v in abs_avg]
+                all_vals_r.extend(vals)
+                char_data_r.append((sheet.name, vals))
+            if all_vals_r and max(all_vals_r) > 0.05:
+                max_vr = max(all_vals_r)
+                tks = _np.linspace(0, max_vr, 4)[1:]
+                ax_r.set_yticks(tks); ax_r.set_yticklabels([])
+                ax_r.set_ylim(0, max_vr * 1.18)
+                ax_r.yaxis.grid(color="#d4ba90", linewidth=0.5, linestyle="--", alpha=0.7)
+                ax_r.xaxis.grid(color="#d4ba90", linewidth=0.5, alpha=0.5)
+                ax_r.spines["polar"].set_color("#d4ba90")
+                for ci, (cname, vals) in enumerate(char_data_r):
+                    col = CHAR_COLORS[ci % len(CHAR_COLORS)]
+                    vp  = vals + [vals[0]]; ap = angles_r + [angles_r[0]]
+                    ax_r.fill(ap, vp, color=col, alpha=0.18)
+                    ax_r.plot(ap, vp, color=col, linewidth=1.6, label=cname)
+                    ax_r.scatter(angles_r, vals, color=col, s=14, zorder=4, edgecolors="white", linewidths=0.6)
+                ax_r.set_xticks(angles_r); ax_r.set_xticklabels(labels_r, fontsize=7.5, color="#111111")
+                ax_r.legend(fontsize=7, loc="upper right", bbox_to_anchor=(1.32, 1.15),
+                            framealpha=0.85, facecolor="#fdf9f6", edgecolor="#d4ba90")
+                fig_r.tight_layout(pad=0.3)
+                _buf_r = _BIO()
+                fig_r.savefig(_buf_r, format="png", dpi=130, bbox_inches="tight", facecolor="#fdf9f6")
+                _plt.close(fig_r)
+                _buf_r.seek(0)
+                from PIL import Image as _PILImage
+                _radar_img = _PILImage.open(_buf_r).copy()
+        except Exception:
+            pass
+
+        if _radar_img is not None:
+            _rw = CONTENT_W
+            _rh = _rw * _radar_img.height / _radar_img.width
+            y = ensure_space(y, _rh + 4 * mm)
+            _buf2 = _BIO(); _radar_img.save(_buf2, format="PNG"); _buf2.seek(0)
+            c.drawImage(_IR(_buf2), MARGIN, y - _rh, width=_rw, height=_rh)
+            y -= _rh + 8 * mm
+
+        # Render by-trait combined line plot
+        _plot_img = _render_personality_by_group_plot(sheets)
+        if _plot_img is not None:
+            _pw = CONTENT_W
+            _ph = _pw * _plot_img.height / _plot_img.width
+            y = ensure_space(y, _ph + 4 * mm)
+            _buf3 = _BIO(); _plot_img.save(_buf3, format="PNG"); _buf3.seek(0)
+            c.drawImage(_IR(_buf3), MARGIN, y - _ph, width=_pw, height=_ph)
+            y -= _ph + 8 * mm
+
+        # Evidence per trait: gather from all characters
+        trait_ids_ordered = []
+        seen_t = set()
+        for sheet in sheets:
+            for tid, tname, _ in sheet.top_archetypes[:5]:
+                if tid not in seen_t:
+                    seen_t.add(tid)
+                    trait_ids_ordered.append((tid, tname))
+
+        ICON_H_PDF = 5 * mm
+        for tid, tname in trait_ids_ordered:
+            any_quotes = any(sheet.evidence.get(tid) for sheet in sheets)
+            if not any_quotes:
+                continue
+            y = ensure_space(y, 16 * mm)
+            c.setFont("Helvetica-Bold", 10)
+            c.setFillColor(C_BLUE)
+            c.drawString(MARGIN, y, tname.upper())
+            y -= 5 * mm
+            for sheet in sheets:
+                quotes = sheet.evidence.get(tid, [])
+                if not quotes:
+                    continue
+                y = ensure_space(y, 10 * mm)
+                c.setFont("Helvetica-Bold", 8)
+                c.setFillColor(C_TEXT)
+                c.drawString(MARGIN + 3 * mm, y, sheet.name)
+                y -= 4 * mm
+                for q in quotes:
+                    wrapped = simpleSplit('"' + q + '"', "Helvetica-Oblique", 9, CONTENT_W - 8 * mm)
+                    for ln in wrapped:
+                        y = ensure_space(y, 4.5 * mm)
+                        c.setFont("Helvetica-Oblique", 9)
+                        c.setFillColor(C_TEXT)
+                        c.drawString(MARGIN + 6 * mm, y, ln)
+                        y -= 4 * mm
+                    y -= 1 * mm
+            y -= 2 * mm
+
+        c.save()
+        return
+
+    # ── By-Character view (default) ────────────────────────────────────────────
+    for idx, sheet in enumerate(sheets):
+        if idx == 0:
+            y = ensure_space(y, 60 * mm)
+        else:
+            new_page()
+            y = TOP_Y
+
+        c.setFillColor(C_TEXT)
+        c.setFont("Helvetica-Bold", 16)
+        name_text = sheet.name
+        alias_str = ("  (" + ", ".join(sheet.aliases) + ")") if sheet.aliases else ""
+        c.drawString(MARGIN, y, name_text)
+        if alias_str:
+            name_w = c.stringWidth(name_text, "Helvetica-Bold", 16)
+            c.setFont("Helvetica", 10)
+            c.setFillColor(C_MUTED)
+            c.drawString(MARGIN + name_w, y, alias_str)
+        y -= 6 * mm
+
+        if sheet.synopsis:
+            c.setFont("Helvetica-Oblique", 10)
+            c.setFillColor(C_MUTED)
+            for ln in simpleSplit(sheet.synopsis, "Helvetica-Oblique", 10, CONTENT_W):
+                y = ensure_space(y, 5 * mm)
+                c.drawString(MARGIN, y, ln)
+                y -= 4.5 * mm
+            y -= 1 * mm
+
+        c.setFont("Helvetica", 9)
+        c.setFillColor(C_MUTED)
+        c.drawString(MARGIN, y, f"{sheet.total_signals} personality signals")
+        y -= 6 * mm
+
+        top3 = sheet.top_archetypes[:3]
+        if top3:
+            import numpy as _np
+            from io import BytesIO as _BIO
+            from reportlab.lib.utils import ImageReader as _IR
+
+            row_h_b    = 6.5 * mm
+            bar_h_b    = 3.5 * mm
+            chart_h_b  = len(top3) * row_h_b
+            badge_h_b  = chart_h_b
+            label_w_b  = 38 * mm
+            score_w_b  = 14 * mm
+            gap_b      = 4 * mm
+            badge_strip = len(top3) * 20 * mm
+            bar_w_b    = CONTENT_W - label_w_b - score_w_b - gap_b - badge_strip
+            bar_x_b    = MARGIN + label_w_b
+            score_x_b  = bar_x_b + bar_w_b + 3 * mm
+            badge_x0   = bar_x_b + bar_w_b + score_w_b + gap_b
+            max_score  = max(abs(s) for _, _, s in top3) or 1
+
+            y = ensure_space(y, chart_h_b + 4 * mm)
+            bar_start_y = y
+
+            for tid, name, score in top3:
+                bar_mid = y - row_h_b / 2
+                bar_top = bar_mid + bar_h_b / 2
+                fill_w  = bar_w_b * abs(score) / max_score
+                high_n, low_n = _pole_map_pdf.get(tid, (name, name))
+                pole_label = high_n if score >= 0 else low_n
+                c.setFont("Helvetica", 9)
+                c.setFillColor(C_TEXT)
+                c.drawString(MARGIN, bar_mid - 1.5 * mm, pole_label)
+                c.setFillColor(C_BAR_BG)
+                c.rect(bar_x_b, bar_top - bar_h_b, bar_w_b, bar_h_b, fill=1, stroke=0)
+                if fill_w > 0:
+                    c.setFillColor(C_ACCENT)
+                    c.rect(bar_x_b, bar_top - bar_h_b, fill_w, bar_h_b, fill=1, stroke=0)
+                c.setFont("Helvetica", 8)
+                c.setFillColor(C_MUTED)
+                c.drawString(score_x_b, bar_mid - 1.5 * mm, f"{score:+.2f}")
+                y -= row_h_b
+
+            bx = badge_x0
+            for trait_id, _, t_score in top3:
+                try:
+                    ic = Image.open(_personality_icon_path(trait_id, t_score)).convert("RGBA")
+                    ow, oh = ic.size
+                    bw = badge_h_b * ow / oh
+                    buf = _BIO(); ic.save(buf, format="PNG"); buf.seek(0)
+                    c.drawImage(_IR(buf), bx, bar_start_y - badge_h_b,
+                                width=bw, height=badge_h_b, mask="auto")
+                    bx += bw + 1 * mm
+                except Exception:
+                    pass
+
+            y -= 4 * mm
+
+        _plot_img = _render_personality_plot([sheet])
+        if _plot_img is not None:
+            from reportlab.lib.utils import ImageReader as _IR
+            from io import BytesIO as _BIO
+            _buf = _BIO(); _plot_img.save(_buf, format="PNG"); _buf.seek(0)
+            _pw = CONTENT_W
+            _ph = _pw * _plot_img.height / _plot_img.width
+            y = ensure_space(y, _ph + 4 * mm)
+            c.drawImage(_IR(_buf), MARGIN, y - _ph, width=_pw, height=_ph)
+            y -= _ph + 6 * mm
+
+        if sheet.top_archetypes:
+            y -= 3 * mm
+
+        ICON_H_PDF = 5 * mm
+        for tid, trait_name, t_score in sheet.top_archetypes[:5]:
+            quotes = sheet.evidence.get(tid, [])
+            if not quotes:
+                continue
+            y = ensure_space(y, 14 * mm)
+            _icon_drawn = False
+            try:
+                from io import BytesIO as _BIO2
+                from reportlab.lib.utils import ImageReader as _IR2
+                _ic2 = Image.open(_personality_icon_path(tid, t_score)).convert("RGBA")
+                _buf2 = _BIO2(); _ic2.save(_buf2, format="PNG"); _buf2.seek(0)
+                _iw2 = ICON_H_PDF * _ic2.width / _ic2.height
+                c.drawImage(_IR2(_buf2), MARGIN, y - ICON_H_PDF + 1 * mm,
+                            width=_iw2, height=ICON_H_PDF, mask="auto")
+                _icon_drawn = True
+            except Exception:
+                pass
+            _name_x = MARGIN + (ICON_H_PDF + 2 * mm if _icon_drawn else 0)
+            _high_n, _low_n = _pole_map_pdf.get(tid, (trait_name, trait_name))
+            _pole_label = _high_n if t_score >= 0 else _low_n
+            c.setFont("Helvetica-Bold", 9)
+            c.setFillColor(C_BLUE)
+            c.drawString(_name_x, y, _pole_label.upper())
+            y -= 4.5 * mm
+            for q in quotes:
+                wrapped = simpleSplit(
+                    '“' + q + '”', "Helvetica-Oblique", 9, CONTENT_W - 6 * mm
+                )
+                for ln in wrapped:
+                    y = ensure_space(y, 4.5 * mm)
+                    c.setFont("Helvetica-Oblique", 9)
+                    c.setFillColor(C_TEXT)
+                    c.drawString(MARGIN + 3 * mm, y, ln)
+                    y -= 4 * mm
+                y -= 1 * mm
+            y -= 2 * mm
+
+        y = ensure_space(y, 8 * mm)
+        c.setStrokeColor(C_BORDER)
+        c.setLineWidth(0.4)
+        c.line(MARGIN, y, W - MARGIN, y)
+        y -= 8 * mm
+
+    c.save()
+
+
 def _make_genre_pie_widget(parent, results: list[GenreResult]):
     """Radial bar chart of genre signal distribution."""
     try:
@@ -1244,7 +2634,7 @@ def _write_arch_report(path: str, title: str, sheets) -> None:
     c.save()
 
 
-def _write_emotion_report(path: str, title: str, sheets) -> None:
+def _write_emotion_report(path: str, title: str, sheets, group_by: str = "character") -> None:
     from datetime import date
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
@@ -1333,6 +2723,132 @@ def _write_emotion_report(path: str, title: str, sheets) -> None:
     c.line(MARGIN, y, W - MARGIN, y)
     y -= 8 * mm
 
+    if group_by == "emotion":
+        # ── By-Emotion view: combined radar + by-emotion sections ──────────────
+        from io import BytesIO as _BIO
+        from reportlab.lib.utils import ImageReader as _IR
+        import matplotlib
+        matplotlib.use("Agg")
+
+        # Render combined radar
+        _radar_img = None
+        try:
+            import matplotlib.pyplot as _plt
+            import numpy as _np
+
+            emotions   = load_emotions()
+            by_id_e    = {e["id"]: e for e in emotions}
+            ordered_e  = [by_id_e[eid] for eid in PLUTCHIK_ORDER if eid in by_id_e]
+            ordered_e  += [e for e in emotions if e["id"] not in PLUTCHIK_ORDER]
+            all_ids_e  = [e["id"] for e in ordered_e]
+            labels_e   = [e["name"] for e in ordered_e]
+            N_e        = len(ordered_e)
+            angles_e   = _np.linspace(0, 2 * _np.pi, N_e, endpoint=False).tolist()
+
+            fig_r, ax_r = _plt.subplots(figsize=(5, 5), subplot_kw=dict(polar=True), facecolor="#fdf9f6")
+            ax_r.set_facecolor("#faf5ec")
+            all_vals_e  = []
+            char_data_e = []
+            for sheet in sheets:
+                totals = {eid: 0.0 for eid in all_ids_e}
+                T = sheet.total_signals or 1
+                for sig in sheet.signals_ordered:
+                    for eid, score in sig.get("scores", {}).items():
+                        if eid in totals:
+                            totals[eid] += score
+                raw   = [totals[eid] / T for eid in all_ids_e]
+                floor = max(raw) * 0.06 if max(raw) > 0 else 0
+                vals  = [max(v, floor) for v in raw]
+                all_vals_e.extend(vals)
+                char_data_e.append((sheet.name, vals))
+            if all_vals_e and max(all_vals_e) > 0.05:
+                max_ve = max(all_vals_e)
+                tks = _np.linspace(0, max_ve, 4)[1:]
+                ax_r.set_yticks(tks); ax_r.set_yticklabels([])
+                ax_r.set_ylim(0, max_ve * 1.18)
+                ax_r.yaxis.grid(color="#d4ba90", linewidth=0.5, linestyle="--", alpha=0.7)
+                ax_r.xaxis.grid(color="#d4ba90", linewidth=0.5, alpha=0.5)
+                ax_r.spines["polar"].set_color("#d4ba90")
+                for ci, (cname, vals) in enumerate(char_data_e):
+                    col = CHAR_COLORS[ci % len(CHAR_COLORS)]
+                    vp  = vals + [vals[0]]; ap = angles_e + [angles_e[0]]
+                    ax_r.fill(ap, vp, color=col, alpha=0.18)
+                    ax_r.plot(ap, vp, color=col, linewidth=1.6, label=cname)
+                    ax_r.scatter(angles_e, vals, color=col, s=14, zorder=4, edgecolors="white", linewidths=0.6)
+                ax_r.set_xticks(angles_e); ax_r.set_xticklabels(labels_e, fontsize=7.5, color="#111111")
+                ax_r.legend(fontsize=7, loc="upper right", bbox_to_anchor=(1.32, 1.15),
+                            framealpha=0.85, facecolor="#fdf9f6", edgecolor="#d4ba90")
+                fig_r.tight_layout(pad=0.3)
+                _buf_r = _BIO()
+                fig_r.savefig(_buf_r, format="png", dpi=130, bbox_inches="tight", facecolor="#fdf9f6")
+                _plt.close(fig_r)
+                _buf_r.seek(0)
+                from PIL import Image as _PILImage
+                _radar_img = _PILImage.open(_buf_r).copy()
+        except Exception:
+            pass
+
+        if _radar_img is not None:
+            _rw = CONTENT_W
+            _rh = _rw * _radar_img.height / _radar_img.width
+            y = ensure_space(y, _rh + 4 * mm)
+            _buf2 = _BIO(); _radar_img.save(_buf2, format="PNG"); _buf2.seek(0)
+            c.drawImage(_IR(_buf2), MARGIN, y - _rh, width=_rw, height=_rh)
+            y -= _rh + 8 * mm
+
+        # Render by-emotion combined line plot
+        _plot_img = _render_emotion_by_group_plot(sheets)
+        if _plot_img is not None:
+            _pw = CONTENT_W
+            _ph = _pw * _plot_img.height / _plot_img.width
+            y = ensure_space(y, _ph + 4 * mm)
+            _buf3 = _BIO(); _plot_img.save(_buf3, format="PNG"); _buf3.seek(0)
+            c.drawImage(_IR(_buf3), MARGIN, y - _ph, width=_pw, height=_ph)
+            y -= _ph + 8 * mm
+
+        # Evidence per emotion: gather from all characters
+        emotion_ids_ordered = []
+        seen_e = set()
+        for sheet in sheets:
+            for eid, ename, _ in sheet.top_archetypes[:5]:
+                if eid not in seen_e:
+                    seen_e.add(eid)
+                    emotion_ids_ordered.append((eid, ename))
+
+        ICON_H_PDF = 5 * mm
+        for eid, ename in emotion_ids_ordered:
+            any_quotes = any(sheet.evidence.get(eid) for sheet in sheets)
+            if not any_quotes:
+                continue
+            y = ensure_space(y, 16 * mm)
+            c.setFont("Helvetica-Bold", 10)
+            c.setFillColor(C_BLUE)
+            c.drawString(MARGIN, y, ename.upper())
+            y -= 5 * mm
+            for sheet in sheets:
+                quotes = sheet.evidence.get(eid, [])
+                if not quotes:
+                    continue
+                y = ensure_space(y, 10 * mm)
+                c.setFont("Helvetica-Bold", 8)
+                c.setFillColor(C_TEXT)
+                c.drawString(MARGIN + 3 * mm, y, sheet.name)
+                y -= 4 * mm
+                for q in quotes:
+                    wrapped = simpleSplit('"' + q + '"', "Helvetica-Oblique", 9, CONTENT_W - 8 * mm)
+                    for ln in wrapped:
+                        y = ensure_space(y, 4.5 * mm)
+                        c.setFont("Helvetica-Oblique", 9)
+                        c.setFillColor(C_TEXT)
+                        c.drawString(MARGIN + 6 * mm, y, ln)
+                        y -= 4 * mm
+                    y -= 1 * mm
+            y -= 2 * mm
+
+        c.save()
+        return
+
+    # ── By-Character view (default) ────────────────────────────────────────────
     for idx, sheet in enumerate(sheets):
         if idx == 0:
             y = ensure_space(y, 60 * mm)
@@ -2048,35 +3564,47 @@ class App(tk.Tk):
         self._model_var_copy  = tk.StringVar(value=next(iter(MODELS)))
         self._model_var_arch  = tk.StringVar(value=next(iter(MODELS)))
         self._model_var_emot  = tk.StringVar(value=next(iter(MODELS)))
+        self._model_var_pers  = tk.StringVar(value=next(iter(MODELS)))
         self._model_var_genre = tk.StringVar(value=next(iter(MODELS)))
         self._synopsis_result: SynopsisResult | None = None
         self._arcs_result:    ArcsResult | None = None
         self._opening_result: OpeningResult | None = None
         self._focal_chars_var      = tk.StringVar(value="")
         self._focal_chars_emot_var = tk.StringVar(value="")
-        self._enabled_vars:   dict[str, tk.BooleanVar] = {}
-        self._archetype_vars: dict[str, tk.BooleanVar] = {}
-        self._emotion_vars:   dict[str, tk.BooleanVar] = {}
-        self._genre_vars:     dict[str, tk.BooleanVar] = {}
+        self._focal_chars_pers_var = tk.StringVar(value="")
+        self._enabled_vars:    dict[str, tk.BooleanVar] = {}
+        self._archetype_vars:  dict[str, tk.BooleanVar] = {}
+        self._emotion_vars:    dict[str, tk.BooleanVar] = {}
+        self._personality_vars: dict[str, tk.BooleanVar] = {}
+        self._genre_vars:      dict[str, tk.BooleanVar] = {}
         self._opening_item_vars: dict[str, tk.BooleanVar] = {}
         self._arc_structural_vars: dict[str, tk.BooleanVar] = {}
         self._arc_character_var = tk.BooleanVar(value=True)
         self._style_vars:     dict[str, tk.StringVar]  = {}
 
-        self._custom_archetypes: list[dict] = []
-        self._custom_emotions:   list[dict] = []
-        self._custom_genres:     list[dict] = []
+        self._custom_archetypes:  list[dict] = []
+        self._custom_emotions:    list[dict] = []
+        self._custom_personalities: list[dict] = []
+        self._custom_genres:      list[dict] = []
 
         self._arch_grid:       tk.Frame | None = None
         self._emot_grid:       tk.Frame | None = None
+        self._pers_grid:       tk.Frame | None = None
         self._genre_grid:      tk.Frame | None = None
         self._arch_grid_count  = 0
         self._emot_grid_count  = 0
+        self._pers_grid_count  = 0
         self._genre_grid_count = 0
+
+        self._personality_sheets: list[CharacterSheet] = []
+
+        self._emot_group_by = tk.StringVar(value="emotion")
+        self._pers_group_by = tk.StringVar(value="trait")
 
         self._copy_settings_open    = False
         self._arch_settings_open    = False
         self._emot_settings_open    = False
+        self._pers_settings_open    = False
         self._opening_settings_open = False
         self._syn_settings_open     = False
 
@@ -2166,6 +3694,7 @@ class App(tk.Tk):
         self._build_synopsis_tab()
         self._build_archetypes_tab()
         self._build_emotions_tab()
+        self._build_personality_tab()
         self._build_genre_tab()
         self._build_copyedit_tab()
 
@@ -2207,7 +3736,7 @@ class App(tk.Tk):
         self._status_opening.pack(side=tk.LEFT, padx=(12, 0))
 
         self._btn_save_opening = _flat_btn(
-            open_bar, "Save report PDF", self._save_opening_report
+            open_bar, "Save PDF report", self._save_opening_report
         )
 
         self._cog_opening = _cog_btn(open_bar, self._toggle_opening_settings)
@@ -2369,7 +3898,7 @@ class App(tk.Tk):
         )
         self._status_synopsis.pack(side=tk.LEFT, padx=(12, 0))
 
-        self._btn_save_syn = _flat_btn(syn_bar, "Save report PDF", self._save_syn_report)
+        self._btn_save_syn = _flat_btn(syn_bar, "Save PDF report", self._save_syn_report)
 
         self._cog_syn = _cog_btn(syn_bar, self._toggle_syn_settings)
         self._cog_syn.pack(side=tk.RIGHT)
@@ -2478,7 +4007,7 @@ class App(tk.Tk):
         self._status_arch.pack(side=tk.LEFT, padx=(12, 0))
 
         # save button inserted after status via after= when revealed
-        self._btn_save_arch = _flat_btn(arch_bar, "Save report PDF", self._save_arch_report)
+        self._btn_save_arch = _flat_btn(arch_bar, "Save PDF report", self._save_arch_report)
 
         self._cog_arch = _cog_btn(arch_bar, self._toggle_arch_settings)
         self._cog_arch.pack(side=tk.RIGHT)
@@ -2537,7 +4066,7 @@ class App(tk.Tk):
         )
         self._status_emot.pack(side=tk.LEFT, padx=(12, 0))
 
-        self._btn_save_emot = _flat_btn(emot_bar, "Save report PDF", self._save_emotion_report)
+        self._btn_save_emot = _flat_btn(emot_bar, "Save PDF report", self._save_emotion_report)
 
         self._cog_emot = _cog_btn(emot_bar, self._toggle_emot_settings)
         self._cog_emot.pack(side=tk.RIGHT)
@@ -2578,6 +4107,65 @@ class App(tk.Tk):
             lambda e: self._emot_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
         )
 
+    def _build_personality_tab(self):
+        pers_tab = tk.Frame(self._notebook, bg=BG)
+        self._notebook.add(pers_tab, text="Personality")
+
+        pers_bar = tk.Frame(pers_tab, bg=BG, padx=18, pady=8)
+        pers_bar.pack(fill=tk.X)
+
+        self._btn_analyze_pers = _flat_btn(
+            pers_bar, "Analyze", self._start_personality,
+            primary=True, state=tk.DISABLED
+        )
+        self._btn_analyze_pers.pack(side=tk.LEFT)
+
+        self._status_pers = tk.Label(
+            pers_bar, text="", font=FONT_SMALL, fg=TEXT_MUTED, bg=BG
+        )
+        self._status_pers.pack(side=tk.LEFT, padx=(12, 0))
+
+        self._btn_save_pers = _flat_btn(pers_bar, "Save PDF report", self._save_personality_report)
+
+        self._cog_pers = _cog_btn(pers_bar, self._toggle_pers_settings)
+        self._cog_pers.pack(side=tk.RIGHT)
+
+        tk.Frame(pers_tab, bg=BORDER, height=1).pack(fill=tk.X, padx=18)
+
+        self._pers_settings = self._build_pers_settings(pers_tab)
+
+        self._pers_outer = tk.Frame(pers_tab, bg=BG, padx=18, pady=14)
+        self._pers_outer.pack(fill=tk.BOTH, expand=True)
+
+        self._pers_canvas = tk.Canvas(
+            self._pers_outer, bg=BG_RESULTS, highlightthickness=0, bd=0
+        )
+        pers_scrollbar = tk.Scrollbar(
+            self._pers_outer, orient=tk.VERTICAL, command=self._pers_canvas.yview
+        )
+        self._pers_canvas.configure(yscrollcommand=pers_scrollbar.set)
+        pers_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._pers_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._pers_frame = tk.Frame(self._pers_canvas, bg=BG_RESULTS)
+        self._pers_window = self._pers_canvas.create_window(
+            (0, 0), window=self._pers_frame, anchor="nw"
+        )
+        self._pers_frame.bind(
+            "<Configure>",
+            lambda _: self._pers_canvas.configure(
+                scrollregion=self._pers_canvas.bbox("all")
+            ),
+        )
+        self._pers_canvas.bind(
+            "<Configure>",
+            lambda e: self._pers_canvas.itemconfig(self._pers_window, width=e.width),
+        )
+        self._pers_canvas.bind(
+            "<MouseWheel>",
+            lambda e: self._pers_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
+        )
+
     def _build_genre_tab(self):
         genre_tab = tk.Frame(self._notebook, bg=BG)
         self._notebook.add(genre_tab, text="Genres")
@@ -2596,7 +4184,7 @@ class App(tk.Tk):
         )
         self._status_genre.pack(side=tk.LEFT, padx=(12, 0))
 
-        self._btn_save_genre = _flat_btn(genre_bar, "Save report PDF", self._save_genre_report)
+        self._btn_save_genre = _flat_btn(genre_bar, "Save PDF report", self._save_genre_report)
 
         self._cog_genre = _cog_btn(genre_bar, self._toggle_genre_settings)
         self._cog_genre.pack(side=tk.RIGHT)
@@ -2734,6 +4322,14 @@ class App(tk.Tk):
                     if eid not in known and eid not in found:
                         found[eid] = {"id": eid, "name": ename, "description": ""}
             return list(found.values())
+        elif kind == "trait":
+            known = {t["id"] for t in load_personality_traits()}
+            found = {}
+            for sheet in cached.get("sheets", []):
+                for tid, tname, *_ in sheet.top_archetypes:
+                    if tid not in known and tid not in found:
+                        found[tid] = {"id": tid, "name": tname, "description": ""}
+            return list(found.values())
         elif kind == "genre":
             known = {g["name"] for g in load_genres()}
             found = {}
@@ -2782,6 +4378,23 @@ class App(tk.Tk):
                     selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
                 ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
                 self._emot_grid_count += 1
+        elif kind == "trait":
+            for item in items:
+                tid = item.get("id", "")
+                if not tid or tid in self._personality_vars:
+                    continue
+                self._custom_personalities.append(item)
+                var = tk.BooleanVar(value=True)
+                self._personality_vars[tid] = var
+                cols = 5
+                row, col = divmod(self._pers_grid_count, cols)
+                tk.Checkbutton(
+                    self._pers_grid, text=item["name"], variable=var,
+                    font=FONT_SMALL, bg=BG_SETTINGS, fg=TEXT,
+                    activebackground=BG_SETTINGS, activeforeground=TEXT,
+                    selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
+                ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
+                self._pers_grid_count += 1
         elif kind == "genre":
             for item in items:
                 name = item.get("name", "")
@@ -2924,6 +4537,112 @@ class App(tk.Tk):
                 selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
             ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
             self._emot_grid_count += 1
+            win.destroy()
+
+        _flat_btn(btn_row, "Cancel", win.destroy).pack(side=tk.LEFT, padx=(0, 6))
+        _flat_btn(btn_row, "Add", _add, primary=True).pack(side=tk.LEFT)
+        win.focus_set()
+        name_entry.bind("<Return>", lambda _: _add())
+        win.wait_window()
+
+    def _open_add_personality_dialog(self):
+        win = tk.Toplevel(self)
+        win.title("Add custom trait")
+        win.configure(bg=BG_SETTINGS)
+        win.resizable(False, False)
+        win.transient(self)
+        win.grab_set()
+
+        pad = {"padx": 14, "pady": 6}
+
+        tk.Label(win, text="Dimension name", font=FONT_LABEL, fg=TEXT_MUTED,
+                 bg=BG_SETTINGS).grid(row=0, column=0, sticky="w", **pad)
+        name_entry = _placeholder_entry(
+            win, "e.g., Dominance",
+            font=FONT_SMALL, bg=BG_RESULTS, relief=tk.FLAT,
+            insertbackground=TEXT, width=34,
+            highlightthickness=1, highlightbackground=BTN_BORDER,
+        )
+        name_entry.grid(row=0, column=1, sticky="ew", **pad)
+
+        tk.Label(win, text="High pole label", font=FONT_LABEL, fg=TEXT_MUTED,
+                 bg=BG_SETTINGS).grid(row=1, column=0, sticky="w", **pad)
+        high_entry = _placeholder_entry(
+            win, "e.g., Dominant  (+3)",
+            font=FONT_SMALL, bg=BG_RESULTS, relief=tk.FLAT,
+            insertbackground=TEXT, width=34,
+            highlightthickness=1, highlightbackground=BTN_BORDER,
+        )
+        high_entry.grid(row=1, column=1, sticky="ew", **pad)
+
+        tk.Label(win, text="Low pole label", font=FONT_LABEL, fg=TEXT_MUTED,
+                 bg=BG_SETTINGS).grid(row=2, column=0, sticky="w", **pad)
+        low_entry = _placeholder_entry(
+            win, "e.g., Submissive  (-3)",
+            font=FONT_SMALL, bg=BG_RESULTS, relief=tk.FLAT,
+            insertbackground=TEXT, width=34,
+            highlightthickness=1, highlightbackground=BTN_BORDER,
+        )
+        low_entry.grid(row=2, column=1, sticky="ew", **pad)
+
+        tk.Label(win, text="High pole (+)", font=FONT_LABEL, fg=TEXT_MUTED,
+                 bg=BG_SETTINGS).grid(row=3, column=0, sticky="nw", **pad)
+        high_desc = _placeholder_text(
+            win,
+            "Describe what scores near +3 look like — assertive, commanding, directs others.",
+            font=FONT_SMALL, bg=BG_RESULTS, relief=tk.FLAT,
+            insertbackground=TEXT, width=34, height=2, wrap=tk.WORD,
+            highlightthickness=1, highlightbackground=BTN_BORDER,
+        )
+        high_desc.grid(row=3, column=1, sticky="ew", **pad)
+
+        tk.Label(win, text="Low pole (−)", font=FONT_LABEL, fg=TEXT_MUTED,
+                 bg=BG_SETTINGS).grid(row=4, column=0, sticky="nw", **pad)
+        low_desc = _placeholder_text(
+            win,
+            "Describe what scores near -3 look like — deferential, avoids conflict, follows.",
+            font=FONT_SMALL, bg=BG_RESULTS, relief=tk.FLAT,
+            insertbackground=TEXT, width=34, height=2, wrap=tk.WORD,
+            highlightthickness=1, highlightbackground=BTN_BORDER,
+        )
+        low_desc.grid(row=4, column=1, sticky="ew", **pad)
+
+        err_lbl = tk.Label(win, text="", font=FONT_SMALL, fg="#c0392b", bg=BG_SETTINGS)
+        err_lbl.grid(row=5, column=0, columnspan=2, sticky="w", padx=14)
+
+        btn_row = tk.Frame(win, bg=BG_SETTINGS)
+        btn_row.grid(row=6, column=0, columnspan=2, sticky="e", padx=14, pady=(4, 10))
+
+        def _add():
+            name = ("" if name_entry._has_placeholder else name_entry.get()).strip()
+            if not name:
+                err_lbl.config(text="Dimension name is required.")
+                return
+            high_n = ("" if high_entry._has_placeholder else high_entry.get()).strip() or name
+            low_n  = ("" if low_entry._has_placeholder  else low_entry.get()).strip()  or name
+            h_desc = ("" if high_desc._has_placeholder  else high_desc.get("1.0", tk.END).strip())
+            l_desc = ("" if low_desc._has_placeholder   else low_desc.get("1.0", tk.END).strip())
+            tid  = self._unique_id(name, self._personality_vars)
+            item = {
+                "id":              tid,
+                "name":            name,
+                "high_name":       high_n,
+                "low_name":        low_n,
+                "description":     h_desc,
+                "low_description": l_desc,
+            }
+            self._custom_personalities.append(item)
+            var = tk.BooleanVar(value=True)
+            self._personality_vars[tid] = var
+            cols = 5
+            row, col = divmod(self._pers_grid_count, cols)
+            tk.Checkbutton(
+                self._pers_grid, text=name, variable=var,
+                font=FONT_SMALL, bg=BG_SETTINGS, fg=TEXT,
+                activebackground=BG_SETTINGS, activeforeground=TEXT,
+                selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
+            ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
+            self._pers_grid_count += 1
             win.destroy()
 
         _flat_btn(btn_row, "Cancel", win.destroy).pack(side=tk.LEFT, padx=(0, 6))
@@ -3181,6 +4900,81 @@ class App(tk.Tk):
             self._cog_emot.config(fg=ACCENT, bg=BTN_SEC)
         self._emot_settings_open = not self._emot_settings_open
 
+    def _build_pers_settings(self, parent) -> tk.Frame:
+        panel = tk.Frame(parent, bg=BG_SETTINGS, padx=18, pady=12)
+
+        model_row = tk.Frame(panel, bg=BG_SETTINGS)
+        model_row.pack(fill=tk.X)
+        tk.Label(model_row, text="MODEL", font=FONT_LABEL,
+                 fg=TEXT_MUTED, bg=BG_SETTINGS).pack(side=tk.LEFT)
+        ttk.Combobox(
+            model_row, textvariable=self._model_var_pers,
+            values=list(MODELS.keys()), state="readonly",
+            width=14, font=FONT_SMALL,
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        tk.Frame(panel, bg=BORDER, height=1).pack(fill=tk.X, pady=(10, 10))
+
+        pers_hdr = tk.Frame(panel, bg=BG_SETTINGS)
+        pers_hdr.pack(fill=tk.X, pady=(0, 6))
+        tk.Label(pers_hdr, text="TRAITS", font=FONT_LABEL,
+                 fg=TEXT_MUTED, bg=BG_SETTINGS).pack(side=tk.LEFT)
+        tk.Button(
+            pers_hdr, text="+ add", font=FONT_SMALL, relief=tk.FLAT,
+            bg=BG_SETTINGS, fg=ACCENT, cursor="hand2", bd=0,
+            activebackground=BG_SETTINGS, activeforeground=ACCENT_HOV,
+            command=self._open_add_personality_dialog,
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        for label, val in [("none", False), ("·", None), ("all", True)]:
+            if val is None:
+                tk.Label(pers_hdr, text=label, font=FONT_SMALL,
+                         fg=TEXT_MUTED, bg=BG_SETTINGS).pack(side=tk.RIGHT)
+            else:
+                tk.Button(
+                    pers_hdr, text=label, font=FONT_SMALL, relief=tk.FLAT,
+                    bg=BG_SETTINGS, fg=ACCENT, cursor="hand2", bd=0,
+                    activebackground=BG_SETTINGS, activeforeground=ACCENT_HOV,
+                    command=lambda v=val: [x.set(v) for x in self._personality_vars.values()],
+                ).pack(side=tk.RIGHT, padx=(0 if label == "none" else 4, 0))
+
+        self._pers_grid = tk.Frame(panel, bg=BG_SETTINGS)
+        self._pers_grid.pack(fill=tk.X)
+        cols = 5
+        _traits = load_personality_traits()
+        for idx, t in enumerate(_traits):
+            var = tk.BooleanVar(value=True)
+            self._personality_vars[t["id"]] = var
+            row, col = divmod(idx, cols)
+            tk.Checkbutton(
+                self._pers_grid, text=t["name"], variable=var,
+                font=FONT_SMALL, bg=BG_SETTINGS, fg=TEXT,
+                activebackground=BG_SETTINGS, activeforeground=TEXT,
+                selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
+            ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
+        self._pers_grid_count = len(_traits)
+
+        tk.Frame(panel, bg=BORDER, height=1).pack(fill=tk.X, pady=(10, 10))
+
+        tk.Label(panel, text="FOCAL CHARACTERS", font=FONT_LABEL,
+                 fg=TEXT_MUTED, bg=BG_SETTINGS, anchor="w").pack(fill=tk.X)
+        tk.Label(panel, text="comma-separated · leave blank to detect automatically",
+                 font=FONT_SMALL, fg=TEXT_MUTED, bg=BG_SETTINGS, anchor="w"
+                 ).pack(fill=tk.X, pady=(2, 4))
+        tk.Entry(panel, textvariable=self._focal_chars_pers_var, font=FONT_SMALL,
+                 bg=BG_RESULTS, fg=TEXT, relief=tk.FLAT, insertbackground=TEXT,
+                 highlightthickness=1, highlightbackground=BTN_BORDER,
+                 ).pack(fill=tk.X)
+        return panel
+
+    def _toggle_pers_settings(self):
+        if self._pers_settings_open:
+            self._pers_settings.pack_forget()
+            self._cog_pers.config(fg=TEXT_MUTED, bg=BG)
+        else:
+            self._pers_settings.pack(fill=tk.X, before=self._pers_outer)
+            self._cog_pers.config(fg=ACCENT, bg=BTN_SEC)
+        self._pers_settings_open = not self._pers_settings_open
+
     def _build_genre_settings(self, parent) -> tk.Frame:
         panel = tk.Frame(parent, bg=BG_SETTINGS, padx=18, pady=12)
 
@@ -3323,7 +5117,7 @@ class App(tk.Tk):
         if not self._filepath:
             return
         from core.cache import _cache_path, CACHE_DIR
-        kinds = ("copyedit", "archetypes", "emotions", "genres", "synopsis", "opening", "arcs")
+        kinds = ("copyedit", "archetypes", "emotions", "personality", "genres", "synopsis", "opening", "arcs")
         existing = [_cache_path(self._filepath, k) for k in kinds
                     if _cache_path(self._filepath, k).exists()]
         if not existing:
@@ -3349,24 +5143,27 @@ class App(tk.Tk):
             for p in existing:
                 try: p.unlink()
                 except Exception: pass
-            self._synopsis_result = None
-            self._arcs_result     = None
-            self._opening_result  = None
-            self._results         = []
-            self._sheets          = []
-            self._emotion_sheets  = []
+            self._synopsis_result     = None
+            self._arcs_result         = None
+            self._opening_result      = None
+            self._results             = []
+            self._sheets              = []
+            self._emotion_sheets      = []
+            self._personality_sheets  = []
             self._clear_results()
             self._show_placeholder()
             self._status_opening.config(text="")
             self._status_copy.config(text="")
             self._status_arch.config(text="")
             self._status_emot.config(text="")
+            self._status_pers.config(text="")
             self._status_genre.config(text="")
             self._status_synopsis.config(text="")
             self._btn_save_opening.pack_forget()
             self._btn_save.pack_forget()
             self._btn_save_arch.pack_forget()
             self._btn_save_emot.pack_forget()
+            self._btn_save_pers.pack_forget()
             self._btn_save_syn.pack_forget()
             popup.destroy()
 
@@ -3380,24 +5177,27 @@ class App(tk.Tk):
         )
         if not path:
             return
-        self._filepath       = path
-        self._results        = []
-        self._sheets         = []
-        self._emotion_sheets = []
-        self._synopsis_result = None
-        self._arcs_result     = None
-        self._opening_result  = None
+        self._filepath            = path
+        self._results             = []
+        self._sheets              = []
+        self._emotion_sheets      = []
+        self._personality_sheets  = []
+        self._synopsis_result     = None
+        self._arcs_result         = None
+        self._opening_result      = None
         self._file_lbl.config(text=Path(path).stem)
         self._btn_analyze_opening.config(state=tk.NORMAL)
         self._btn_analyze_copy.config(state=tk.NORMAL)
         self._btn_analyze_arch.config(state=tk.NORMAL)
         self._btn_analyze_emot.config(state=tk.NORMAL)
+        self._btn_analyze_pers.config(state=tk.NORMAL)
         self._btn_analyze_genre.config(state=tk.NORMAL)
         self._btn_regen_synopsis.config(state=tk.NORMAL)
         self._btn_save_opening.pack_forget()
         self._btn_save.pack_forget()
         self._btn_save_arch.pack_forget()
         self._btn_save_emot.pack_forget()
+        self._btn_save_pers.pack_forget()
         self._btn_save_syn.pack_forget()
         self._clear_results()
         self._show_placeholder()
@@ -3405,6 +5205,7 @@ class App(tk.Tk):
         self._status_copy.config(text="")
         self._status_arch.config(text="")
         self._status_emot.config(text="")
+        self._status_pers.config(text="")
         self._status_genre.config(text="")
         self._status_synopsis.config(text="")
         if self._landing.winfo_ismapped():
@@ -3415,6 +5216,7 @@ class App(tk.Tk):
         self.after(0, lambda: self._start_copyedit(from_cache_only=True))
         self.after(0, lambda: self._start_archetypes(from_cache_only=True))
         self.after(0, lambda: self._start_emotions(from_cache_only=True))
+        self.after(0, lambda: self._start_personality(from_cache_only=True))
         self.after(0, lambda: self._start_genre(from_cache_only=True))
 
     # ── opening analysis ───────────────────────────────────────────────────────
@@ -4142,19 +5944,46 @@ class App(tk.Tk):
             tk.Label(self._emot_frame, text="No named characters detected.",
                      font=FONT_BODY, fg=TEXT_MUTED, bg=BG_RESULTS).pack(pady=30)
         else:
+            mode = self._emot_group_by.get()
+
+            toggle_row = tk.Frame(self._emot_frame, bg=BG_RESULTS)
+            toggle_row.pack(fill=tk.X, padx=16, pady=(14, 2))
+            _make_group_toggle(
+                toggle_row,
+                self._emot_group_by,
+                "By Emotion", "emotion",
+                "By Character", "character",
+                on_change=lambda: self._show_emotion_results(self._emotion_sheets),
+            ).pack(side=tk.LEFT)
+
             tk.Label(
                 self._emot_frame,
                 text=f"{len(sheets)} character{'s' if len(sheets) != 1 else ''} identified",
                 font=FONT_SMALL, fg=TEXT_MUTED, bg=BG_RESULTS, anchor="w"
-            ).pack(fill=tk.X, padx=16, pady=(14, 10))
+            ).pack(fill=tk.X, padx=16, pady=(6, 8))
 
             all_cidxs = [s["chunk_idx"] for sh in sheets for s in sh.signals_ordered]
             tc = max(all_cidxs) + 1 if all_cidxs else 1
-            for idx, sheet in enumerate(sheets):
-                self._add_emotion_card(sheet, first=(idx == 0))
-                plot_frame = _make_emotion_plot_widget(self._emot_frame, [sheet], total_chunks=tc)
+
+            if mode == "emotion":
+                radar = _make_combined_emotion_radar_widget(
+                    self._emot_frame, sheets,
+                    extra_emotions=self._custom_emotions or None,
+                )
+                if radar is not None:
+                    radar.pack(padx=16, pady=(0, 14))
+                plot_frame = _make_emotion_by_group_plot_widget(
+                    self._emot_frame, sheets, total_chunks=tc,
+                )
                 if plot_frame is not None:
                     plot_frame.pack(fill=tk.X, padx=16, pady=(0, 14))
+            else:
+                for idx, sheet in enumerate(sheets):
+                    self._add_emotion_card(sheet, first=(idx == 0))
+                    plot_frame = _make_emotion_plot_widget(self._emot_frame, [sheet], total_chunks=tc)
+                    if plot_frame is not None:
+                        plot_frame.pack(fill=tk.X, padx=16, pady=(0, 14))
+
             self._btn_save_emot.pack(side=tk.LEFT, padx=(8, 0), after=self._status_emot)
 
         self._bind_mousewheel(self._emot_frame, self._emot_canvas)
@@ -4317,14 +6146,39 @@ class App(tk.Tk):
         self._btn_save_emot.config(state=tk.DISABLED)
         update = self._make_save_popup(out_path)
 
+        group_by_emot = self._emot_group_by.get()
+
         def do_save():
             try:
-                _write_emotion_report(out_path, Path(self._filepath).stem, self._emotion_sheets)
+                _write_emotion_report(out_path, Path(self._filepath).stem,
+                                      self._emotion_sheets, group_by=group_by_emot)
                 self.after(0, update, True)
             except Exception as exc:
                 self.after(0, update, False, "", str(exc))
             finally:
                 self.after(0, self._btn_save_emot.config, {"state": tk.NORMAL})
+
+        threading.Thread(target=do_save, daemon=True).start()
+
+    def _save_personality_report(self):
+        if not self._personality_sheets or not self._filepath:
+            return
+        base, _ = os.path.splitext(self._filepath)
+        out_path = base + "_personality.pdf"
+        self._btn_save_pers.config(state=tk.DISABLED)
+        update = self._make_save_popup(out_path)
+
+        group_by_pers = self._pers_group_by.get()
+
+        def do_save():
+            try:
+                _write_personality_report(out_path, Path(self._filepath).stem,
+                                          self._personality_sheets, group_by=group_by_pers)
+                self.after(0, update, True)
+            except Exception as exc:
+                self.after(0, update, False, "", str(exc))
+            finally:
+                self.after(0, self._btn_save_pers.config, {"state": tk.NORMAL})
 
         threading.Thread(target=do_save, daemon=True).start()
 
@@ -4356,6 +6210,186 @@ class App(tk.Tk):
                  ).pack(padx=16, pady=20)
         self._status_emot.config(text="Error.")
         self._btn_analyze_emot.config(state=tk.NORMAL)
+
+    # ── personality analysis ───────────────────────────────────────────────────
+
+    def _start_personality(self, from_cache_only: bool = False):
+        if from_cache_only:
+            cached = load_personality_cache(self._filepath)
+            if cached is not None:
+                custom = cached.get("custom_traits", []) or self._infer_custom_from_cache("trait", cached)
+                self._restore_custom_items("trait", custom)
+                self._show_personality_results(cached["sheets"])
+                self._status_pers.config(
+                    text=f"Cached {_fmt_cache_dt(cached['analyzed_at'])} · Analyze to refresh"
+                )
+            return
+        self._btn_analyze_pers.config(state=tk.DISABLED)
+        self._btn_save_pers.pack_forget()
+        self._personality_sheets = []
+        for w in self._pers_frame.winfo_children():
+            w.destroy()
+        self._status_pers.config(text="Starting…")
+        threading.Thread(target=self._run_personality, daemon=True).start()
+
+    def _run_personality(self):
+        try:
+            model = MODELS[self._model_var_pers.get()]
+            self._ensure_synopsis(self._status_pers.config, model)
+            raw_focal = self._focal_chars_pers_var.get().strip()
+            focal = [n.strip() for n in raw_focal.split(",") if n.strip()] if raw_focal else None
+            if not focal:
+                arch_cached = load_arch_cache(self._filepath)
+                if arch_cached and arch_cached.get("sheets"):
+                    focal = [s.name for s in arch_cached["sheets"]]
+                    self.after(0, self._status_pers.config, {"text": "Reusing characters from archetype cache…"})
+            enabled_traits = [tid for tid, v in self._personality_vars.items() if v.get()] or None
+            syn_text = self._synopsis_result.synopsis if self._synopsis_result else ""
+            sheets, _ = analyze_personality(
+                self._filepath,
+                syn_text,
+                model=model,
+                focal_characters=focal,
+                enabled_traits=enabled_traits,
+                extra_traits=self._custom_personalities or None,
+                on_progress=lambda c, t: self.after(
+                    0, self._status_pers.config,
+                    {"text": f"Analyzing personality… {round(c/t*100)}%"},
+                ),
+            )
+            save_personality_cache(self._filepath, sheets, self._custom_personalities or None)
+            self.after(0, self._show_personality_results, sheets)
+        except Exception as exc:
+            self.after(0, self._show_error_pers, exc)
+
+    def _show_personality_results(self, sheets: list[CharacterSheet]):
+        self._personality_sheets = sheets
+        for w in self._pers_frame.winfo_children():
+            w.destroy()
+
+        if not sheets:
+            tk.Label(self._pers_frame, text="No named characters detected.",
+                     font=FONT_BODY, fg=TEXT_MUTED, bg=BG_RESULTS).pack(pady=30)
+        else:
+            mode = self._pers_group_by.get()
+
+            toggle_row = tk.Frame(self._pers_frame, bg=BG_RESULTS)
+            toggle_row.pack(fill=tk.X, padx=16, pady=(14, 2))
+            _make_group_toggle(
+                toggle_row,
+                self._pers_group_by,
+                "By Trait", "trait",
+                "By Character", "character",
+                on_change=lambda: self._show_personality_results(self._personality_sheets),
+            ).pack(side=tk.LEFT)
+
+            tk.Label(
+                self._pers_frame,
+                text=f"{len(sheets)} character{'s' if len(sheets) != 1 else ''} identified",
+                font=FONT_SMALL, fg=TEXT_MUTED, bg=BG_RESULTS, anchor="w"
+            ).pack(fill=tk.X, padx=16, pady=(6, 8))
+
+            all_cidxs = [s["chunk_idx"] for sh in sheets for s in sh.signals_ordered]
+            tc = max(all_cidxs) + 1 if all_cidxs else 1
+
+            if mode == "trait":
+                radar = _make_combined_personality_radar_widget(
+                    self._pers_frame, sheets,
+                    extra_traits=self._custom_personalities or None,
+                )
+                if radar is not None:
+                    radar.pack(padx=16, pady=(0, 14))
+                plot_frame = _make_personality_by_group_plot_widget(
+                    self._pers_frame, sheets, total_chunks=tc,
+                )
+                if plot_frame is not None:
+                    plot_frame.pack(fill=tk.X, padx=16, pady=(0, 14))
+            else:
+                for idx, sheet in enumerate(sheets):
+                    self._add_personality_card(sheet, first=(idx == 0))
+                    plot_frame = _make_personality_plot_widget(self._pers_frame, [sheet], total_chunks=tc)
+                    if plot_frame is not None:
+                        plot_frame.pack(fill=tk.X, padx=16, pady=(0, 14))
+
+            self._btn_save_pers.pack(side=tk.LEFT, padx=(8, 0), after=self._status_pers)
+
+        self._bind_mousewheel(self._pers_frame, self._pers_canvas)
+        self._btn_analyze_pers.config(state=tk.NORMAL)
+        self._status_pers.config(text="Done.")
+
+    def _add_personality_card(self, sheet: CharacterSheet, first: bool = False):
+        card = tk.Frame(self._pers_frame, bg=BG, relief=tk.FLAT, bd=0)
+        card.pack(fill=tk.X, padx=16, pady=(0 if first else 18, 14))
+        tk.Frame(card, bg=ACCENT, width=3).pack(side=tk.LEFT, fill=tk.Y)
+
+        body = tk.Frame(card, bg=BG)
+        body.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(12, 16), pady=(10, 12))
+
+        name_row = tk.Frame(body, bg=BG)
+        name_row.pack(fill=tk.X)
+        tk.Label(name_row, text=sheet.name,
+                 font=FONT_TYPE, fg=TEXT, bg=BG, anchor="w").pack(side=tk.LEFT)
+        if sheet.aliases:
+            tk.Label(name_row,
+                     text="  " + ", ".join(f'"{a}"' for a in sheet.aliases),
+                     font=FONT_SMALL, fg=TEXT_MUTED, bg=BG, anchor="w").pack(side=tk.LEFT)
+
+        if sheet.synopsis:
+            tk.Label(body, text=sheet.synopsis,
+                     font=FONT_BODY, fg=TEXT_MUTED, bg=BG,
+                     anchor="w", wraplength=680, justify=tk.LEFT).pack(fill=tk.X, pady=(3, 0))
+
+        top3 = [(tid, tname, sc) for tid, tname, sc in sheet.top_archetypes[:3] if abs(sc) >= 0.1]
+        radar_row = tk.Frame(body, bg=BG)
+        radar_row.pack(anchor="w", pady=(10, 0))
+
+        radar = _make_personality_radar_widget(radar_row, sheet,
+                                               extra_traits=self._custom_personalities or None)
+        if radar is not None:
+            radar.pack(side=tk.LEFT)
+
+        if top3:
+            # build pole-name lookup from loaded traits
+            _all_traits = load_personality_traits()
+            _pole_map = {
+                t["id"]: (t.get("high_name", t["name"]), t.get("low_name", t["name"]))
+                for t in _all_traits
+            }
+            icons_strip = tk.Frame(radar_row, bg=BG)
+            icons_strip.pack(side=tk.LEFT, padx=(20, 0), anchor="s")
+            icon_refs = []
+            pers_scores = [abs(sc) for _, _, sc in top3]
+            icon_sizes  = _softmax_sizes(pers_scores, lo=52, hi=96)
+            for (tid, tname, t_sc), sz in zip(top3, icon_sizes):
+                icon_path = _personality_icon_path(tid, t_sc)
+                high_n, low_n = _pole_map.get(tid, (tname, tname))
+                display_name = high_n if t_sc >= 0 else low_n
+                cell = tk.Frame(icons_strip, bg=BG)
+                cell.pack(side=tk.LEFT, padx=(0, 12), anchor="s")
+                try:
+                    img = Image.open(icon_path).convert("RGBA")
+                    img = img.resize((sz, sz), Image.LANCZOS)
+                    photo = ImageTk.PhotoImage(img)
+                    icon_refs.append(photo)
+                    tk.Label(cell, image=photo, bg=BG, bd=0).pack()
+                except Exception:
+                    pass
+                tk.Label(cell, text=display_name, font=FONT_SMALL, fg=TEXT_MUTED,
+                         bg=BG, anchor="center").pack()
+            icons_strip._icon_refs = icon_refs
+
+        tk.Label(body, text=f"{sheet.total_signals} personality signals",
+                 font=FONT_SMALL, fg=TEXT_MUTED, bg=BG, anchor="w"
+                 ).pack(fill=tk.X, pady=(6, 0))
+
+    def _show_error_pers(self, exc: Exception):
+        for w in self._pers_frame.winfo_children():
+            w.destroy()
+        tk.Label(self._pers_frame, text=f"Error: {exc}",
+                 font=FONT_BODY, fg="#e05252", bg=BG_RESULTS, anchor="w"
+                 ).pack(padx=16, pady=20)
+        self._status_pers.config(text="Error.")
+        self._btn_analyze_pers.config(state=tk.NORMAL)
 
     # ── genre analysis ─────────────────────────────────────────────────────────
 
