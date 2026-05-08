@@ -1,5 +1,5 @@
 """
-Three-pass Big Five personality analysis for Mirror.
+Two-pass Big Five personality analysis for Mirror.
 
 Identical pipeline structure to emotion_analyzer but scores character
 personality traits (Openness, Conscientiousness, Extraversion, Agreeableness,
@@ -7,7 +7,6 @@ Neuroticism) instead of emotions.
 
 Pass 1  Character discovery -- shared with character_analyzer.
 Pass 2  Trait annotation -- finds and scores Big Five trait expressions.
-Pass 3  Contradiction annotation -- finds moments of acting against dominant traits.
 """
 
 import json
@@ -19,8 +18,9 @@ import anthropic
 
 from .reviewer import _get_api_key, TokenUsage, load_docx
 from .character_analyzer import (
-    RosterEntry, CharacterSheet, _Signal, _chunk, _first_word,
+    RosterEntry, CharacterSheet, _Signal, _chunk,
     _aggregate_roster, _run_discovery,
+    _parse_scored_signals, _build_scored_sheets, _run_annotation_pass,
     DISCOVERY_CHUNK_CHARS, ANNOTATION_CHUNK_CHARS,
     DEFAULT_ROSTER_SIZE, MAX_CONCURRENT, DEFAULT_MODEL,
 )
@@ -82,119 +82,14 @@ No text outside the structured blocks."""
 
 
 def _parse_trait_signals(response: str, roster: list[RosterEntry]) -> list[_Signal]:
-    if "NO SIGNALS" in response.upper() and "CHARACTER:" not in response.upper():
-        return []
-
-    lookup: dict[str, str] = {}
-    for e in roster:
-        lookup[e.name.lower()] = e.name
-        for a in e.aliases:
-            lookup[a.lower()] = e.name
-
-    def _resolve(raw: str) -> str | None:
-        raw_l = raw.strip().lower()
-        if raw_l in lookup:
-            return lookup[raw_l]
-        fw = _first_word(raw_l)
-        for k, v in lookup.items():
-            if _first_word(k) == fw:
-                return v
-        return None
-
-    signals: list[_Signal] = []
-    for block in re.split(r"\n---+\n?", response):
-        block = block.strip()
-        if not block:
-            continue
-        char_m   = re.search(r"^CHARACTER:\s*(.+)$", block, re.MULTILINE)
-        signal_m = re.search(r"^SIGNAL:\s*(.+)$",    block, re.MULTILINE)
-        trait_m  = re.search(r"^TRAITS:\s*(.+)$",    block, re.MULTILINE)
-        offset_m = re.search(r"^OFFSET:\s*(\d+)$",   block, re.MULTILINE)
-        if not (char_m and signal_m):
-            continue
-        canonical = _resolve(char_m.group(1).strip())
-        if canonical is None:
-            continue
-        scores: dict[str, float] = {}
-        if trait_m:
-            raw_traits = trait_m.group(1).strip()
-            if raw_traits.lower() != "none":
-                for part in raw_traits.split(","):
-                    part = part.strip()
-                    if ":" in part:
-                        tid, _, score_s = part.partition(":")
-                        try:
-                            scores[tid.strip()] = float(score_s.strip())
-                        except ValueError:
-                            pass
-        raw_signal = signal_m.group(1).strip().strip("\"'").strip('“”‘’').strip()
-        offset = max(0, min(100, int(offset_m.group(1)))) if offset_m else 50
-        signals.append(_Signal(character=canonical, signal=raw_signal, scores=scores, offset=offset))
-    return signals
-
+    return _parse_scored_signals(response, roster, "TRAITS")
 
 def _build_personality_sheets(
     signals: list[_Signal],
     roster: list[RosterEntry],
     traits: list[dict],
 ) -> list[CharacterSheet]:
-    trait_name = {t["id"]: t["name"] for t in traits}
-    all_ids = [t["id"] for t in traits]
-
-    by_char: dict[str, list[_Signal]] = {e.name: [] for e in roster}
-    for sig in signals:
-        if sig.character in by_char:
-            by_char[sig.character].append(sig)
-
-    sheets: list[CharacterSheet] = []
-    for entry in roster:
-        char_signals = by_char[entry.name]
-        T = len(char_signals)
-        if T == 0:
-            continue
-
-        totals: dict[str, float] = {tid: 0.0 for tid in all_ids}
-        for sig in char_signals:
-            for tid, score in sig.scores.items():
-                if tid in totals:
-                    totals[tid] += score
-
-        avg = {tid: totals[tid] / T for tid in all_ids}
-        # rank by |avg| so strongest poles (either direction) come first
-        ranked = sorted(avg.items(), key=lambda x: -abs(x[1]))
-
-        top = [
-            (tid, trait_name.get(tid, tid), round(score, 2))
-            for tid, score in ranked[:5]
-            if abs(score) >= 0.1
-        ]
-
-        evidence: dict[str, list[str]] = {}
-        for tid, _, _ in top:
-            scored = sorted(
-                [(s.signal, s.scores.get(tid, 0.0)) for s in char_signals
-                 if tid in s.scores],
-                key=lambda x: -abs(x[1]),
-            )
-            evidence[tid] = [s for s, _ in scored[:3]]
-
-        signals_ordered = [
-            {"chunk_idx": s.chunk_idx, "offset": s.offset, "scores": dict(s.scores), "signal": s.signal}
-            for s in sorted(char_signals, key=lambda s: (s.chunk_idx, s.offset))
-        ]
-
-        sheets.append(CharacterSheet(
-            name=entry.name,
-            aliases=entry.aliases,
-            synopsis=entry.synopsis,
-            top_archetypes=top,
-            evidence=evidence,
-            total_signals=T,
-            chunks_seen=entry.chunks_seen,
-            signals_ordered=signals_ordered,
-        ))
-    return sheets
-
+    return _build_scored_sheets(signals, roster, traits, bipolar=True, threshold=0.1)
 
 async def _run_trait_annotation(
     chunks: list[str],
@@ -206,154 +101,13 @@ async def _run_trait_annotation(
     on_progress,
     on_raw=None,
 ) -> tuple[list[_Signal], TokenUsage]:
-    system = _trait_annotation_system(roster, traits)
-    total  = len(chunks)
-    done   = [0]
-    usages: list[TokenUsage] = []
-
-    async def _call(idx: int, chunk: str) -> list[_Signal]:
-        async with sem:
-            for attempt in range(5):
-                try:
-                    resp = await client.messages.create(
-                        model=model,
-                        max_tokens=2048,
-                        temperature=0,
-                        system=system,
-                        messages=[{"role": "user",
-                                   "content": f"Annotate this excerpt:\n\n{chunk}"}],
-                    )
-                    break
-                except anthropic.RateLimitError:
-                    await asyncio.sleep(20 * (2 ** attempt))
-            else:
-                return []
-            raw = resp.content[0].text.strip()
-            usages.append(TokenUsage(resp.usage.input_tokens, resp.usage.output_tokens))
-            done[0] += 1
-            if on_progress:
-                on_progress("Annotating personality", done[0], total)
-            if on_raw:
-                on_raw("personality", idx, chunk, raw)
-            sigs = _parse_trait_signals(raw, roster)
-            for s in sigs:
-                s.chunk_idx = idx
-            return sigs
-
-    results = await asyncio.gather(*(_call(i, c) for i, c in enumerate(chunks)))
-    all_signals = [sig for chunk_sigs in results for sig in chunk_sigs]
-    return all_signals, sum(usages, TokenUsage())
-
-
-# ── Pass 3: contradiction annotation ─────────────────────────────────────────
-
-def _contradiction_annotation_system(sheets: list[CharacterSheet],
-                                      traits: list[dict]) -> str:
-    trait_name  = {t["id"]: t["name"]      for t in traits}
-    high_name   = {t["id"]: t.get("high_name", t["name"])       for t in traits}
-    low_name    = {t["id"]: t.get("low_name",  "Low " + t["name"]) for t in traits}
-    char_blocks = []
-    for s in sheets:
-        aliases = f"  (also: {', '.join(s.aliases)})" if s.aliases else ""
-        top_parts = []
-        for tid, _, score in s.top_archetypes[:3]:
-            pole = high_name.get(tid, tid) if score >= 0 else low_name.get(tid, tid)
-            top_parts.append(f"{pole} [{tid}]")
-        top = "  ".join(top_parts)
-        char_blocks.append(f"  {s.name}{aliases}\n    dominant poles: {top}")
-    roster_block = "\n".join(char_blocks)
-
-    return f"""\
-You find moments where characters act against or contradict their dominant personality poles.
-
-Characters and their dominant poles (use the bracketed trait ID when scoring):
-{roster_block}
-
-Read the excerpt and find every moment where one of these characters behaves in a way \
-that contradicts their dominant pole — a conscientious character acting recklessly, \
-an agreeable character being callous, an introvert seeking out a crowd, \
-an open character refusing a new idea.
-
-Score each contradiction on the same -3 to +3 bipolar scale used for annotations: \
-assign the score that reflects the CONTRADICTING behavior (the opposite of their dominant pole). \
-For example, if a conscientious character acts carelessly, score conscientiousness: -2. \
-List only traits with |score| >= 1; if none qualify, output TRAITS: none.
-
-Output one block per moment:
-
-CHARACTER: [canonical name from the list above]
-SIGNAL: [one-sentence quote or tight paraphrase of the moment]
-BEHAVIOR: [one sentence on how this contradicts their dominant personality pole]
-TRAITS: [id:score, id:score, ...] or "none"
----
-
-If no contradiction moments appear in this excerpt, output: NO SIGNALS
-No text outside the structured blocks."""
-
-
-async def _run_contradiction_annotation(
-    chunks: list[str],
-    sheets: list[CharacterSheet],
-    traits: list[dict],
-    client: anthropic.AsyncAnthropic,
-    model: str,
-    sem: asyncio.Semaphore,
-    on_progress,
-    on_raw=None,
-) -> tuple[list[_Signal], TokenUsage]:
-    system = _contradiction_annotation_system(sheets, traits)
-    roster = [RosterEntry(name=s.name, aliases=s.aliases, synopsis=s.synopsis)
-              for s in sheets]
-    total  = len(chunks)
-    done   = [0]
-    usages: list[TokenUsage] = []
-
-    async def _call(idx: int, chunk: str) -> list[_Signal]:
-        async with sem:
-            for attempt in range(5):
-                try:
-                    resp = await client.messages.create(
-                        model=model,
-                        max_tokens=2048,
-                        temperature=0,
-                        system=system,
-                        messages=[{"role": "user",
-                                   "content": f"Annotate this excerpt:\n\n{chunk}"}],
-                    )
-                    break
-                except anthropic.RateLimitError:
-                    await asyncio.sleep(20 * (2 ** attempt))
-            else:
-                return []
-            raw = resp.content[0].text.strip()
-            usages.append(TokenUsage(resp.usage.input_tokens, resp.usage.output_tokens))
-            done[0] += 1
-            if on_progress:
-                on_progress("Scanning trait contradictions", done[0], total)
-            if on_raw:
-                on_raw("contradiction", idx, chunk, raw)
-            sigs = _parse_trait_signals(raw, roster)
-            for s in sigs:
-                s.chunk_idx = idx
-            return sigs
-
-    results = await asyncio.gather(*(_call(i, c) for i, c in enumerate(chunks)))
-    all_sigs = [sig for chunk_sigs in results for sig in chunk_sigs]
-    return all_sigs, sum(usages, TokenUsage())
-
-
-def _merge_contradiction_signals(sheets: list[CharacterSheet],
-                                  neg_signals: list[_Signal]) -> None:
-    by_char: dict[str, list[_Signal]] = {s.name: [] for s in sheets}
-    for sig in neg_signals:
-        if sig.character in by_char:
-            by_char[sig.character].append(sig)
-    for sheet in sheets:
-        sheet.neg_signals_ordered = [
-            {"chunk_idx": s.chunk_idx, "scores": dict(s.scores), "signal": s.signal}
-            for s in sorted(by_char[sheet.name], key=lambda s: s.chunk_idx)
-        ]
-
+    return await _run_annotation_pass(
+        chunks, _trait_annotation_system(roster, traits),
+        _parse_trait_signals, roster,
+        client, model, sem, on_progress,
+        phase="Annotating personality",
+        on_raw=on_raw, raw_phase="personality",
+    )
 
 # ── async orchestration ───────────────────────────────────────────────────────
 

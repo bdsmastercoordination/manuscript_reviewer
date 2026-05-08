@@ -359,11 +359,18 @@ def _annotation_prompt(chunk: str) -> str:
     return f"Annotate this excerpt:\n\n{chunk}"
 
 
-def _parse_signals(response: str, roster: list[RosterEntry]) -> list[_Signal]:
+def _parse_scored_signals(
+    response: str,
+    roster: list[RosterEntry],
+    field_key: str,
+) -> list[_Signal]:
+    """Parse structured annotation blocks into _Signal objects.
+
+    field_key is the ALL-CAPS label used in the prompt (ARCHETYPES, EMOTIONS, TRAITS).
+    """
     if "NO SIGNALS" in response.upper() and "CHARACTER:" not in response.upper():
         return []
 
-    # build lookup: any name or alias (lowercase) → canonical name
     lookup: dict[str, str] = {}
     for e in roster:
         lookup[e.name.lower()] = e.name
@@ -385,47 +392,55 @@ def _parse_signals(response: str, roster: list[RosterEntry]) -> list[_Signal]:
         block = block.strip()
         if not block:
             continue
-        char_m   = re.search(r"^CHARACTER:\s*(.+)$",  block, re.MULTILINE)
-        signal_m = re.search(r"^SIGNAL:\s*(.+)$",     block, re.MULTILINE)
-        arch_m   = re.search(r"^ARCHETYPES:\s*(.+)$", block, re.MULTILINE)
-        offset_m = re.search(r"^OFFSET:\s*(\d+)$",    block, re.MULTILINE)
+        char_m   = re.search(r"^CHARACTER:\s*(.+)$",      block, re.MULTILINE)
+        signal_m = re.search(r"^SIGNAL:\s*(.+)$",         block, re.MULTILINE)
+        score_m  = re.search(rf"^{field_key}:\s*(.+)$",   block, re.MULTILINE)
+        offset_m = re.search(r"^OFFSET:\s*(\d+)$",       block, re.MULTILINE)
         if not (char_m and signal_m):
             continue
         canonical = _resolve(char_m.group(1).strip())
         if canonical is None:
             continue
         scores: dict[str, float] = {}
-        if arch_m:
-            raw_arch = arch_m.group(1).strip()
-            if raw_arch.lower() != "none":
-                for part in raw_arch.split(","):
+        if score_m:
+            raw_scores = score_m.group(1).strip()
+            if raw_scores.lower() != "none":
+                for part in raw_scores.split(","):
                     part = part.strip()
                     if ":" in part:
-                        aid, _, score_s = part.partition(":")
+                        sid, _, score_s = part.partition(":")
                         try:
-                            scores[aid.strip()] = float(score_s.strip())
+                            scores[sid.strip()] = float(score_s.strip())
                         except ValueError:
                             pass
-        raw_signal = signal_m.group(1).strip().strip('"\'').strip('\u201c\u201d\u2018\u2019').strip()
+        raw_signal = signal_m.group(1).strip().strip('"\'').strip('“”‘’').strip()
         offset = max(0, min(100, int(offset_m.group(1)))) if offset_m else 50
-        signals.append(_Signal(
-            character=canonical,
-            signal=raw_signal,
-            scores=scores,
-            offset=offset,
-        ))
+        signals.append(_Signal(character=canonical, signal=raw_signal, scores=scores, offset=offset))
     return signals
 
 
+def _parse_signals(response: str, roster: list[RosterEntry]) -> list[_Signal]:
+    return _parse_scored_signals(response, roster, "ARCHETYPES")
+
 # ── signal aggregation → character sheets ─────────────────────────────────────
 
-def _build_sheets(
+def _build_scored_sheets(
     signals: list[_Signal],
     roster:  list[RosterEntry],
-    archetypes: list[dict],
+    items:   list[dict],
+    *,
+    bipolar:   bool  = False,
+    threshold: float = 0.0,
 ) -> list[CharacterSheet]:
-    archetype_name = {a["id"]: a["name"] for a in archetypes}
-    all_ids        = [a["id"] for a in archetypes]
+    """Aggregate signals into CharacterSheets.
+
+    bipolar=True  ranks by |score| and filters by abs(score) >= threshold
+                  (used for Big Five where negative poles are meaningful).
+    bipolar=False ranks by score descending and filters by score > threshold
+                  (used for archetypes and emotions).
+    """
+    item_name = {i["id"]: i["name"] for i in items}
+    all_ids   = [i["id"] for i in items]
 
     by_char: dict[str, list[_Signal]] = {e.name: [] for e in roster}
     for sig in signals:
@@ -439,31 +454,36 @@ def _build_sheets(
         if T == 0:
             continue
 
-        # Sum scores over all T instances; missing scores count as 0
-        totals: dict[str, float] = {aid: 0.0 for aid in all_ids}
+        totals: dict[str, float] = {iid: 0.0 for iid in all_ids}
         for sig in char_signals:
-            for aid, score in sig.scores.items():
-                if aid in totals:
-                    totals[aid] += score
+            for iid, score in sig.scores.items():
+                if iid in totals:
+                    totals[iid] += score
 
-        avg = {aid: totals[aid] / T for aid in all_ids}
-        ranked = sorted(avg.items(), key=lambda x: -x[1])
+        avg = {iid: totals[iid] / T for iid in all_ids}
+        if bipolar:
+            ranked = sorted(avg.items(), key=lambda x: -abs(x[1]))
+            top = [
+                (iid, item_name.get(iid, iid), round(score, 2))
+                for iid, score in ranked[:5]
+                if abs(score) >= threshold
+            ]
+        else:
+            ranked = sorted(avg.items(), key=lambda x: -x[1])
+            top = [
+                (iid, item_name.get(iid, iid), round(score, 2))
+                for iid, score in ranked[:5]
+                if score > threshold
+            ]
 
-        top = [
-            (aid, archetype_name.get(aid, aid), round(score, 2))
-            for aid, score in ranked[:5]
-            if score > 0
-        ]
-
-        # Evidence: for each top archetype, pick the signals where it scored highest
         evidence: dict[str, list[str]] = {}
-        for aid, _, _ in top:
+        sort_key = (lambda x: -abs(x[1])) if bipolar else (lambda x: -x[1])
+        for iid, _, _ in top:
             scored = sorted(
-                [(s.signal, s.scores.get(aid, 0.0)) for s in char_signals
-                 if aid in s.scores],
-                key=lambda x: -x[1],
+                [(s.signal, s.scores.get(iid, 0.0)) for s in char_signals if iid in s.scores],
+                key=sort_key,
             )
-            evidence[aid] = [s for s, _ in scored[:3]]
+            evidence[iid] = [s for s, _ in scored[:3]]
 
         signals_ordered = [
             {"chunk_idx": s.chunk_idx, "offset": s.offset, "scores": dict(s.scores), "signal": s.signal}
@@ -480,9 +500,15 @@ def _build_sheets(
             chunks_seen=entry.chunks_seen,
             signals_ordered=signals_ordered,
         ))
-
     return sheets
 
+
+def _build_sheets(
+    signals: list[_Signal],
+    roster:  list[RosterEntry],
+    archetypes: list[dict],
+) -> list[CharacterSheet]:
+    return _build_scored_sheets(signals, roster, archetypes)
 
 # ── async API layer ───────────────────────────────────────────────────────────
 
@@ -529,6 +555,63 @@ async def _run_discovery(
     return per_chunk, sum(usages, TokenUsage())
 
 
+async def _run_annotation_pass(
+    chunks:    list[str],
+    system:    str,
+    parse_fn,
+    roster:    list[RosterEntry],
+    client:    anthropic.AsyncAnthropic,
+    model:     str,
+    sem:       asyncio.Semaphore,
+    on_progress,
+    phase:     str,
+    on_raw=None,
+    raw_phase: str = "annotation",
+    max_tokens: int = 2048,
+) -> tuple[list[_Signal], TokenUsage]:
+    """Shared async runner for all annotation passes.
+
+    Sends system as a cached block so the (large, repeated) system prompt is
+    only charged once per annotation run.
+    """
+    system_msg = [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+    total  = len(chunks)
+    done   = [0]
+    usages: list[TokenUsage] = []
+
+    async def _call(idx: int, chunk: str) -> list[_Signal]:
+        async with sem:
+            for attempt in range(5):
+                try:
+                    resp = await client.messages.create(
+                        model=model,
+                        max_tokens=max_tokens,
+                        temperature=0,
+                        system=system_msg,
+                        messages=[{"role": "user",
+                                   "content": f"Annotate this excerpt:\n\n{chunk}"}],
+                    )
+                    break
+                except anthropic.RateLimitError:
+                    await asyncio.sleep(20 * (2 ** attempt))
+            else:
+                return []
+            raw = resp.content[0].text.strip()
+            usages.append(TokenUsage(resp.usage.input_tokens, resp.usage.output_tokens))
+            done[0] += 1
+            if on_progress:
+                on_progress(phase, done[0], total)
+            if on_raw:
+                on_raw(raw_phase, idx, chunk, raw)
+            sigs = parse_fn(raw, roster)
+            for s in sigs:
+                s.chunk_idx = idx
+            return sigs
+
+    results = await asyncio.gather(*(_call(i, c) for i, c in enumerate(chunks)))
+    return [sig for chunk_sigs in results for sig in chunk_sigs], sum(usages, TokenUsage())
+
+
 async def _run_annotation(
     chunks:     list[str],
     roster:     list[RosterEntry],
@@ -539,47 +622,14 @@ async def _run_annotation(
     on_progress,
     on_raw=None,
 ) -> tuple[list[_Signal], TokenUsage]:
-    system  = _annotation_system(roster, archetypes)
-    total   = len(chunks)
-    done    = [0]
-    usages: list[TokenUsage] = []
+    return await _run_annotation_pass(
+        chunks, _annotation_system(roster, archetypes),
+        _parse_signals, roster,
+        client, model, sem, on_progress,
+        phase="Annotating signals",
+        on_raw=on_raw, raw_phase="annotation",
+    )
 
-    async def _call(idx: int, chunk: str) -> list[_Signal]:
-        async with sem:
-            for attempt in range(5):
-                try:
-                    resp = await client.messages.create(
-                        model=model,
-                        max_tokens=2048,
-                        temperature=0,
-                        system=system,
-                        messages=[{"role": "user",
-                                   "content": _annotation_prompt(chunk)}],
-                    )
-                    break
-                except anthropic.RateLimitError:
-                    await asyncio.sleep(20 * (2 ** attempt))
-            else:
-                return []
-            raw = resp.content[0].text.strip()
-            usages.append(TokenUsage(resp.usage.input_tokens,
-                                     resp.usage.output_tokens))
-            done[0] += 1
-            if on_progress:
-                on_progress("Annotating signals", done[0], total)
-            if on_raw:
-                on_raw("annotation", idx, chunk, raw)
-            sigs = _parse_signals(raw, roster)
-            for s in sigs:
-                s.chunk_idx = idx
-            return sigs
-
-    results     = await asyncio.gather(*(_call(i, c) for i, c in enumerate(chunks)))
-    all_signals = [sig for chunk_sigs in results for sig in chunk_sigs]
-    return all_signals, sum(usages, TokenUsage())
-
-
-# ── Pass 3: negative / counter-signal annotation ──────────────────────────────
 
 def _negative_annotation_system(sheets: "list[CharacterSheet]",
                                  archetypes: list[dict]) -> str:
@@ -632,8 +682,7 @@ ARCHETYPES: [id:score, id:score, ...] or "none"
 OFFSET: [0-100, where 0 = start of excerpt, 100 = end]
 ---
 
-If no clear unambiguous violations appear in this excerpt, output: NO SIGNALS
-No text outside the structured blocks."""
+If no clear unambiguous violations appear in this excerpt, output: NO SIGNALS"""
 
 
 async def _run_negative_annotation(
@@ -646,46 +695,14 @@ async def _run_negative_annotation(
     on_progress,
     on_raw=None,
 ) -> tuple[list[_Signal], TokenUsage]:
-    system  = _negative_annotation_system(sheets, archetypes)
-    roster  = [RosterEntry(name=s.name, aliases=s.aliases, synopsis=s.synopsis)
-               for s in sheets]
-    total   = len(chunks)
-    done    = [0]
-    usages: list[TokenUsage] = []
-
-    async def _call(idx: int, chunk: str) -> list[_Signal]:
-        async with sem:
-            for attempt in range(5):
-                try:
-                    resp = await client.messages.create(
-                        model=model,
-                        max_tokens=2048,
-                        temperature=0,
-                        system=system,
-                        messages=[{"role": "user",
-                                   "content": _annotation_prompt(chunk)}],
-                    )
-                    break
-                except anthropic.RateLimitError:
-                    await asyncio.sleep(20 * (2 ** attempt))
-            else:
-                return []
-            raw = resp.content[0].text.strip()
-            usages.append(TokenUsage(resp.usage.input_tokens,
-                                     resp.usage.output_tokens))
-            done[0] += 1
-            if on_progress:
-                on_progress("Scanning contradictions", done[0], total)
-            if on_raw:
-                on_raw("negative", idx, chunk, raw)
-            sigs = _parse_signals(raw, roster)
-            for s in sigs:
-                s.chunk_idx = idx
-            return sigs
-
-    results  = await asyncio.gather(*(_call(i, c) for i, c in enumerate(chunks)))
-    all_sigs = [sig for chunk_sigs in results for sig in chunk_sigs]
-    return all_sigs, sum(usages, TokenUsage())
+    roster = [RosterEntry(name=s.name, aliases=s.aliases, synopsis=s.synopsis) for s in sheets]
+    return await _run_annotation_pass(
+        chunks, _negative_annotation_system(sheets, archetypes),
+        _parse_signals, roster,
+        client, model, sem, on_progress,
+        phase="Scanning contradictions",
+        on_raw=on_raw, raw_phase="negative",
+    )
 
 
 def _merge_neg_signals(sheets: "list[CharacterSheet]",

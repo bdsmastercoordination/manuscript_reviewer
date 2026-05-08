@@ -14,14 +14,14 @@ from pathlib import Path
 from collections import defaultdict
 from PIL import Image, ImageTk
 
-from core.reviewer import review_document, ChunkResult, REVIEWER_MODEL
+from core.reviewer import review_document, ChunkResult
 from core.docx_comments import annotate
 from core.prompts import load_error_types, load_style_config, save_style_config
 from core.character_analyzer import analyze_characters, load_archetypes, CharacterSheet
 from core.emotion_analyzer import analyze_emotions, load_emotions
 from core.personality_analyzer import analyze_personality, load_personality_traits
 from core.genre_analyzer import analyze_genres, GenreResult, load_genres
-from core.synopsis_analyzer import analyze_synopsis, SynopsisResult, PlotBeat
+from core.synopsis_analyzer import analyze_synopsis, SynopsisResult
 from core.opening_analyzer import analyze_opening, OpeningResult, CHECKLIST_ITEMS, CONFIDENCE_EMOJI
 from core.arc_analyzer import analyze_arcs, ArcsResult, ArcResult, load_structural_arcs
 from core.cache import (
@@ -111,7 +111,7 @@ STYLE_LABELS = {
 
 def _fmt_cache_dt(iso: str) -> str:
     try:
-        from datetime import datetime, timezone
+        from datetime import datetime
         dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
         return dt.astimezone().strftime("%d %b %Y, %H:%M")
     except Exception:
@@ -1148,17 +1148,10 @@ def _make_personality_radar_widget(parent, sheet, extra_traits=None) -> tk.Frame
     return frame
 
 
-def _make_combined_emotion_radar_widget(parent, sheets, extra_emotions=None) -> "tk.Frame | None":
-    """
-    Render a radar chart with all characters overlaid (one polygon per character).
-    Returns a tk.Frame or None on failure.
-    """
-    try:
-        import matplotlib.pyplot as plt
-        import numpy as np
-        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    except ImportError:
-        return None
+def _build_combined_emotion_radar_fig(sheets, extra_emotions=None):
+    """Build combined emotion radar figure (backend-agnostic). Returns fig or None."""
+    import matplotlib.pyplot as plt
+    import numpy as np
 
     chars = [s for s in sheets if s.signals_ordered]
     if not chars:
@@ -1177,18 +1170,14 @@ def _make_combined_emotion_radar_widget(parent, sheets, extra_emotions=None) -> 
 
     all_ids = [e["id"] for e in ordered]
     labels  = [e["name"] for e in ordered]
-    N = len(ordered)
+    N       = len(ordered)
     angles  = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
 
     FIG_BG = "#fdf9f6"
     AX_BG  = "#faf5ec"
     BORD   = "#d4ba90"
 
-    fig, ax = plt.subplots(
-        figsize=(4.2, 4.2),
-        subplot_kw=dict(polar=True),
-        facecolor=FIG_BG,
-    )
+    fig, ax = plt.subplots(figsize=(5, 5), subplot_kw=dict(polar=True), facecolor=FIG_BG)
     ax.set_facecolor(AX_BG)
 
     all_values = []
@@ -1231,15 +1220,100 @@ def _make_combined_emotion_radar_widget(parent, sheets, extra_emotions=None) -> 
     ax.set_xticklabels(labels, fontsize=7.5, color="#111111")
     ax.legend(fontsize=7, loc="upper right", bbox_to_anchor=(1.32, 1.15),
               framealpha=0.85, facecolor=FIG_BG, edgecolor=BORD)
-
     fig.tight_layout(pad=0.3)
+    return fig
 
+
+def _build_combined_personality_radar_fig(sheets, extra_traits=None):
+    """Build combined personality radar figure (backend-agnostic). Returns fig or None."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    chars = [s for s in sheets if s.signals_ordered]
+    if not chars:
+        return None
+
+    traits = load_personality_traits()
+    if extra_traits:
+        known_ids = {t["id"] for t in traits}
+        traits = traits + [t for t in extra_traits if t["id"] not in known_ids]
+    if not traits:
+        return None
+
+    all_ids = [t["id"] for t in traits]
+    labels  = [t["name"] for t in traits]
+    N       = len(traits)
+    angles  = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
+
+    FIG_BG = "#fdf9f6"
+    AX_BG  = "#faf5ec"
+    BORD   = "#d4ba90"
+
+    fig, ax = plt.subplots(figsize=(5, 5), subplot_kw=dict(polar=True), facecolor=FIG_BG)
+    ax.set_facecolor(AX_BG)
+
+    all_values = []
+    char_data  = []
+    for sheet in chars:
+        totals = {tid: 0.0 for tid in all_ids}
+        T = sheet.total_signals or 1
+        for sig in sheet.signals_ordered:
+            for tid, score in sig.get("scores", {}).items():
+                if tid in totals:
+                    totals[tid] += score
+        avg     = [totals[tid] / T for tid in all_ids]
+        abs_avg = [abs(v) for v in avg]
+        floor   = max(abs_avg) * 0.06 if max(abs_avg) > 0 else 0
+        values  = [max(v, floor) for v in abs_avg]
+        all_values.extend(values)
+        char_data.append((sheet.name, values))
+
+    if not all_values or max(all_values) < 0.05:
+        plt.close(fig)
+        return None
+
+    max_v = max(all_values)
+    ticks = np.linspace(0, max_v, 4)[1:]
+    ax.set_yticks(ticks)
+    ax.set_yticklabels([])
+    ax.set_ylim(0, max_v * 1.18)
+    ax.yaxis.grid(color=BORD, linewidth=0.5, linestyle="--", alpha=0.7)
+    ax.xaxis.grid(color=BORD, linewidth=0.5, alpha=0.5)
+    ax.spines["polar"].set_color(BORD)
+
+    for ci, (cname, values) in enumerate(char_data):
+        col    = CHAR_COLORS[ci % len(CHAR_COLORS)]
+        v_plot = values + [values[0]]
+        a_plot = angles + [angles[0]]
+        ax.fill(a_plot, v_plot, color=col, alpha=0.18)
+        ax.plot(a_plot, v_plot, color=col, linewidth=1.6, label=cname)
+        ax.scatter(angles, values, color=col, s=14, zorder=4, edgecolors="white", linewidths=0.6)
+
+    ax.set_xticks(angles)
+    ax.set_xticklabels(labels, fontsize=7.5, color="#111111")
+    ax.legend(fontsize=7, loc="upper right", bbox_to_anchor=(1.32, 1.15),
+              framealpha=0.85, facecolor=FIG_BG, edgecolor=BORD)
+    fig.tight_layout(pad=0.3)
+    return fig
+
+
+def _make_combined_emotion_radar_widget(parent, sheets, extra_emotions=None) -> "tk.Frame | None":
+    """Render a combined emotion radar chart as a tkinter widget."""
+    try:
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    except ImportError:
+        return None
+    fig = _build_combined_emotion_radar_fig(sheets, extra_emotions)
+    if fig is None:
+        return None
     frame  = tk.Frame(parent, bg=BG)
     canvas = FigureCanvasTkAgg(fig, master=frame)
     canvas.draw()
     canvas.get_tk_widget().pack()
     plt.close(fig)
     return frame
+
 
 
 def _build_emotion_by_group_fig(sheets, total_chunks=None):
@@ -1488,92 +1562,22 @@ def _render_emotion_by_group_plot(sheets):
 
 
 def _make_combined_personality_radar_widget(parent, sheets, extra_traits=None) -> "tk.Frame | None":
-    """
-    Render a radar chart with all characters overlaid (one polygon per character).
-    Uses |avg| for spoke length, dimension name for labels.
-    Returns a tk.Frame or None on failure.
-    """
+    """Render a combined personality radar chart as a tkinter widget."""
     try:
         import matplotlib.pyplot as plt
-        import numpy as np
         from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     except ImportError:
         return None
-
-    chars = [s for s in sheets if s.signals_ordered]
-    if not chars:
+    fig = _build_combined_personality_radar_fig(sheets, extra_traits)
+    if fig is None:
         return None
-
-    traits = load_personality_traits()
-    if extra_traits:
-        known_ids = {t["id"] for t in traits}
-        traits = traits + [t for t in extra_traits if t["id"] not in known_ids]
-    if not traits:
-        return None
-
-    all_ids = [t["id"] for t in traits]
-    labels  = [t["name"] for t in traits]
-    N = len(traits)
-    angles  = [n / float(N) * 2 * 3.14159265 for n in range(N)]
-
-    FIG_BG = "#fdf9f6"
-    AX_BG  = "#faf5ec"
-    BORD   = "#d4ba90"
-
-    fig, ax = plt.subplots(figsize=(4.2, 4.2), subplot_kw=dict(polar=True), facecolor=FIG_BG)
-    ax.set_facecolor(AX_BG)
-
-    all_values = []
-    char_data  = []
-    for sheet in chars:
-        totals = {tid: 0.0 for tid in all_ids}
-        T = sheet.total_signals or 1
-        for sig in sheet.signals_ordered:
-            for tid, score in sig.get("scores", {}).items():
-                if tid in totals:
-                    totals[tid] += score
-        avg     = [totals[tid] / T for tid in all_ids]
-        abs_avg = [abs(v) for v in avg]
-        floor   = max(abs_avg) * 0.06 if max(abs_avg) > 0 else 0
-        values  = [max(v, floor) for v in abs_avg]
-        all_values.extend(values)
-        char_data.append((sheet.name, values))
-
-    if not all_values or max(all_values) < 0.05:
-        plt.close(fig)
-        return None
-
-    import numpy as np
-    max_v = max(all_values)
-    ticks = np.linspace(0, max_v, 4)[1:]
-    ax.set_yticks(ticks)
-    ax.set_yticklabels([])
-    ax.set_ylim(0, max_v * 1.18)
-    ax.yaxis.grid(color=BORD, linewidth=0.5, linestyle="--", alpha=0.7)
-    ax.xaxis.grid(color=BORD, linewidth=0.5, alpha=0.5)
-    ax.spines["polar"].set_color(BORD)
-
-    for ci, (cname, values) in enumerate(char_data):
-        col    = CHAR_COLORS[ci % len(CHAR_COLORS)]
-        v_plot = values + [values[0]]
-        a_plot = angles + [angles[0]]
-        ax.fill(a_plot, v_plot, color=col, alpha=0.18)
-        ax.plot(a_plot, v_plot, color=col, linewidth=1.6, label=cname)
-        ax.scatter(angles, values, color=col, s=14, zorder=4, edgecolors="white", linewidths=0.6)
-
-    ax.set_xticks(angles)
-    ax.set_xticklabels(labels, fontsize=7.5, color="#111111")
-    ax.legend(fontsize=7, loc="upper right", bbox_to_anchor=(1.32, 1.15),
-              framealpha=0.85, facecolor=FIG_BG, edgecolor=BORD)
-
-    fig.tight_layout(pad=0.3)
-
     frame  = tk.Frame(parent, bg=BG)
     canvas = FigureCanvasTkAgg(fig, master=frame)
     canvas.draw()
     canvas.get_tk_widget().pack()
     plt.close(fig)
     return frame
+
 
 
 def _build_personality_by_group_fig(sheets, total_chunks=None):
@@ -1802,8 +1806,19 @@ def _render_personality_by_group_plot(sheets):
     return PILImage.open(buf).copy()
 
 
-def _write_personality_report(path: str, title: str, sheets, group_by: str = "character") -> None:
-    from datetime import date
+from collections import namedtuple as _namedtuple
+
+_PDF = _namedtuple("_PDF", [
+    "c", "W", "MARGIN", "CONTENT_W", "FOOTER_H", "TOP_Y", "mm",
+    "C_BG", "C_ACCENT", "C_ACCENT2", "C_BAR_BG",
+    "C_TEXT", "C_MUTED", "C_BLUE", "C_BORDER", "C_WHITE",
+    "new_page", "ensure_space", "simpleSplit",
+])
+_TabDef = _namedtuple("_TabDef", ["frame", "placeholder", "save_btn"])
+
+
+def _make_pdf_session(path: str, title: str, heading: str) -> "_PDF":
+    """Create a ReportLab PDF canvas with page chrome and return a _PDF session."""
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.units import mm
     from reportlab.lib.colors import HexColor, white
@@ -1820,64 +1835,74 @@ def _write_personality_report(path: str, title: str, sheets, group_by: str = "ch
     C_BORDER  = HexColor("#d4ba90")
     C_WHITE   = white
 
-    W, H = A4
+    W, H      = A4
     MARGIN    = 20 * mm
     CONTENT_W = W - 2 * MARGIN
     BAND_H    = 18 * mm
     FOOTER_H  = 10 * mm
     TOP_Y     = H - BAND_H - 6 * mm
-
     logo_path = str(ICON_PATH)
     logo_size = 13 * mm
     page_num  = [0]
 
     c = PDFCanvas(path, pagesize=A4)
-    c.setTitle(f"Mirror — {title} — Personality Analysis")
+    c.setTitle(f"Mirror — {title} — {heading}")
 
-    # pole-name lookup for bipolar display
+    def _draw_chrome():
+        page_num[0] += 1
+        c.setFillColor(C_BG); c.rect(0, 0, W, H, fill=1, stroke=0)
+        c.setFillColor(C_ACCENT); c.rect(0, H - BAND_H, W, BAND_H, fill=1, stroke=0)
+        c.setStrokeColor(C_ACCENT2); c.setLineWidth(1)
+        c.line(0, H - BAND_H, W, H - BAND_H)
+        band_mid_y = H - BAND_H + (BAND_H - 5 * mm) / 2
+        c.setFont("Helvetica-Bold", 14); c.setFillColor(C_WHITE)
+        c.drawString(MARGIN, band_mid_y, heading)
+        try:
+            c.drawImage(logo_path, W - MARGIN - logo_size,
+                        H - BAND_H + (BAND_H - logo_size) / 2,
+                        width=logo_size, height=logo_size,
+                        preserveAspectRatio=True, mask="auto")
+        except Exception:
+            pass
+        c.setStrokeColor(C_BORDER); c.setLineWidth(0.5)
+        c.line(MARGIN, FOOTER_H, W - MARGIN, FOOTER_H)
+        c.setFont("Helvetica", 8); c.setFillColor(C_MUTED)
+        c.drawCentredString(W / 2, FOOTER_H - 4 * mm, f"Page {page_num[0]}")
+
+    def new_page():
+        c.showPage(); _draw_chrome()
+
+    def ensure_space(y, needed):
+        if y - needed < FOOTER_H + 4 * mm:
+            new_page(); return TOP_Y
+        return y
+
+    _draw_chrome()
+    return _PDF(
+        c=c, W=W, MARGIN=MARGIN, CONTENT_W=CONTENT_W, FOOTER_H=FOOTER_H, TOP_Y=TOP_Y, mm=mm,
+        C_BG=C_BG, C_ACCENT=C_ACCENT, C_ACCENT2=C_ACCENT2, C_BAR_BG=C_BAR_BG,
+        C_TEXT=C_TEXT, C_MUTED=C_MUTED, C_BLUE=C_BLUE, C_BORDER=C_BORDER, C_WHITE=C_WHITE,
+        new_page=new_page, ensure_space=ensure_space, simpleSplit=simpleSplit,
+    )
+
+
+def _write_personality_report(path: str, title: str, sheets, group_by: str = "character") -> None:
+    _HEADING = "Personality Analysis"
+    pdf = _make_pdf_session(path, title, _HEADING)
+    from datetime import date
+    c, W = pdf.c, pdf.W
+    MARGIN, CONTENT_W, FOOTER_H, TOP_Y, mm = (
+        pdf.MARGIN, pdf.CONTENT_W, pdf.FOOTER_H, pdf.TOP_Y, pdf.mm)
+    C_BG, C_ACCENT, C_ACCENT2, C_BAR_BG = (
+        pdf.C_BG, pdf.C_ACCENT, pdf.C_ACCENT2, pdf.C_BAR_BG)
+    C_TEXT, C_MUTED, C_BLUE, C_BORDER, C_WHITE = (
+        pdf.C_TEXT, pdf.C_MUTED, pdf.C_BLUE, pdf.C_BORDER, pdf.C_WHITE)
+    new_page, ensure_space, simpleSplit = pdf.new_page, pdf.ensure_space, pdf.simpleSplit
     from core.personality_analyzer import load_personality_traits as _lpt
     _pole_map_pdf = {
         t["id"]: (t.get("high_name", t["name"]), t.get("low_name", t["name"]))
         for t in _lpt()
     }
-
-    def _draw_page_chrome():
-        page_num[0] += 1
-        c.setFillColor(C_BG)
-        c.rect(0, 0, W, H, fill=1, stroke=0)
-        c.setFillColor(C_ACCENT)
-        c.rect(0, H - BAND_H, W, BAND_H, fill=1, stroke=0)
-        c.setStrokeColor(C_ACCENT2)
-        c.setLineWidth(1)
-        c.line(0, H - BAND_H, W, H - BAND_H)
-
-        band_mid_y = H - BAND_H + (BAND_H - 5 * mm) / 2
-        c.setFont("Helvetica-Bold", 14)
-        c.setFillColor(C_WHITE)
-        c.drawString(MARGIN, band_mid_y, "Personality Analysis")
-
-        try:
-            logo_x = W - MARGIN - logo_size
-            logo_y = H - BAND_H + (BAND_H - logo_size) / 2
-            c.drawImage(logo_path, logo_x, logo_y, width=logo_size, height=logo_size, mask="auto")
-        except Exception:
-            pass
-
-        c.setFont("Helvetica", 8)
-        c.setFillColor(C_MUTED)
-        c.drawCentredString(W / 2, FOOTER_H / 2, f"Mirror · {page_num[0]}")
-
-    def new_page():
-        c.showPage()
-        _draw_page_chrome()
-
-    def ensure_space(y, needed):
-        if y - needed < FOOTER_H + 4 * mm:
-            new_page()
-            return TOP_Y
-        return y
-
-    _draw_page_chrome()
     y = TOP_Y
 
     c.setFont("Helvetica", 10)
@@ -1902,55 +1927,17 @@ def _write_personality_report(path: str, title: str, sheets, group_by: str = "ch
         # Render combined radar
         _radar_img = None
         try:
+            from io import BytesIO as _BIO
+            import matplotlib
+            matplotlib.use("Agg")
             import matplotlib.pyplot as _plt
-            import numpy as _np
-
-            traits = load_personality_traits()
-            all_ids   = [t["id"] for t in traits]
-            labels_r  = [t["name"] for t in traits]
-            N_r = len(traits)
-            angles_r = [n / float(N_r) * 2 * 3.14159265 for n in range(N_r)]
-
-            fig_r, ax_r = _plt.subplots(figsize=(5, 5), subplot_kw=dict(polar=True), facecolor="#fdf9f6")
-            ax_r.set_facecolor("#faf5ec")
-            all_vals_r = []
-            char_data_r = []
-            for sheet in sheets:
-                totals = {tid: 0.0 for tid in all_ids}
-                T = sheet.total_signals or 1
-                for sig in sheet.signals_ordered:
-                    for tid, score in sig.get("scores", {}).items():
-                        if tid in totals:
-                            totals[tid] += score
-                avg     = [totals[tid] / T for tid in all_ids]
-                abs_avg = [abs(v) for v in avg]
-                floor   = max(abs_avg) * 0.06 if max(abs_avg) > 0 else 0
-                vals    = [max(v, floor) for v in abs_avg]
-                all_vals_r.extend(vals)
-                char_data_r.append((sheet.name, vals))
-            if all_vals_r and max(all_vals_r) > 0.05:
-                max_vr = max(all_vals_r)
-                tks = _np.linspace(0, max_vr, 4)[1:]
-                ax_r.set_yticks(tks); ax_r.set_yticklabels([])
-                ax_r.set_ylim(0, max_vr * 1.18)
-                ax_r.yaxis.grid(color="#d4ba90", linewidth=0.5, linestyle="--", alpha=0.7)
-                ax_r.xaxis.grid(color="#d4ba90", linewidth=0.5, alpha=0.5)
-                ax_r.spines["polar"].set_color("#d4ba90")
-                for ci, (cname, vals) in enumerate(char_data_r):
-                    col = CHAR_COLORS[ci % len(CHAR_COLORS)]
-                    vp  = vals + [vals[0]]; ap = angles_r + [angles_r[0]]
-                    ax_r.fill(ap, vp, color=col, alpha=0.18)
-                    ax_r.plot(ap, vp, color=col, linewidth=1.6, label=cname)
-                    ax_r.scatter(angles_r, vals, color=col, s=14, zorder=4, edgecolors="white", linewidths=0.6)
-                ax_r.set_xticks(angles_r); ax_r.set_xticklabels(labels_r, fontsize=7.5, color="#111111")
-                ax_r.legend(fontsize=7, loc="upper right", bbox_to_anchor=(1.32, 1.15),
-                            framealpha=0.85, facecolor="#fdf9f6", edgecolor="#d4ba90")
-                fig_r.tight_layout(pad=0.3)
+            from PIL import Image as _PILImage
+            fig_r = _build_combined_personality_radar_fig(sheets)
+            if fig_r is not None:
                 _buf_r = _BIO()
                 fig_r.savefig(_buf_r, format="png", dpi=130, bbox_inches="tight", facecolor="#fdf9f6")
                 _plt.close(fig_r)
                 _buf_r.seek(0)
-                from PIL import Image as _PILImage
                 _radar_img = _PILImage.open(_buf_r).copy()
         except Exception:
             pass
@@ -2395,89 +2382,17 @@ def _make_genre_plot_widget(parent, results: list, total_chunks=None):
 
 
 def _write_arch_report(path: str, title: str, sheets) -> None:
+    _HEADING = "Archetype Analysis"
+    pdf = _make_pdf_session(path, title, _HEADING)
     from datetime import date
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.lib.colors import HexColor, white
-    from reportlab.pdfgen.canvas import Canvas as PDFCanvas
-    from reportlab.pdfbase import pdfmetrics
-    from reportlab.pdfbase.ttfonts import TTFont
-    from reportlab.lib.utils import simpleSplit
-
-    # ── colours (match app palette) ───────────────────────────
-    C_BG      = HexColor("#fdf9f6")
-    C_ACCENT  = HexColor("#c9a96e")
-    C_ACCENT2 = HexColor("#b8954e")
-    C_BAR_BG  = HexColor("#ede0c8")
-    C_TEXT    = HexColor("#111111")
-    C_MUTED   = HexColor("#6b7280")
-    C_BLUE    = HexColor("#1e40af")
-    C_BORDER  = HexColor("#d4ba90")
-    C_WHITE   = white
-
-    W, H = A4
-    MARGIN    = 20 * mm
-    CONTENT_W = W - 2 * MARGIN
-
-    BAND_H   = 18 * mm
-    FOOTER_H = 10 * mm
-    TOP_Y    = H - BAND_H - 6 * mm
-
-    logo_path = str(ICON_PATH)
-    logo_size = 13 * mm
-
-    page_num = [0]
-
-    c = PDFCanvas(path, pagesize=A4)
-    c.setTitle(f"Mirror — {title}")
-
-    def _draw_page_chrome():
-        page_num[0] += 1
-
-        c.setFillColor(C_BG)
-        c.rect(0, 0, W, H, fill=1, stroke=0)
-
-        c.setFillColor(C_ACCENT)
-        c.rect(0, H - BAND_H, W, BAND_H, fill=1, stroke=0)
-        c.setStrokeColor(C_ACCENT2)
-        c.setLineWidth(1)
-        c.line(0, H - BAND_H, W, H - BAND_H)
-
-        # heading inside the band
-        band_mid_y = H - BAND_H + (BAND_H - 5 * mm) / 2
-        c.setFont("Helvetica-Bold", 14)
-        c.setFillColor(C_WHITE)
-        c.drawString(MARGIN, band_mid_y, "Archetype Analysis")
-
-        try:
-            logo_x = W - MARGIN - logo_size
-            logo_y = H - BAND_H + (BAND_H - logo_size) / 2
-            c.drawImage(logo_path, logo_x, logo_y,
-                        width=logo_size, height=logo_size,
-                        preserveAspectRatio=True, mask="auto")
-        except Exception:
-            pass
-
-        c.setStrokeColor(C_BORDER)
-        c.setLineWidth(0.5)
-        c.line(MARGIN, FOOTER_H, W - MARGIN, FOOTER_H)
-        c.setFont("Helvetica", 8)
-        c.setFillColor(C_MUTED)
-        c.drawCentredString(W / 2, FOOTER_H - 4 * mm, f"Page {page_num[0]}")
-
-    def new_page():
-        c.showPage()
-        _draw_page_chrome()
-
-    def ensure_space(y, needed):
-        if y - needed < FOOTER_H + 4 * mm:
-            new_page()
-            return TOP_Y
-        return y
-
-    # ── first page ────────────────────────────────────────────
-    _draw_page_chrome()
-
+    c, W = pdf.c, pdf.W
+    MARGIN, CONTENT_W, FOOTER_H, TOP_Y, mm = (
+        pdf.MARGIN, pdf.CONTENT_W, pdf.FOOTER_H, pdf.TOP_Y, pdf.mm)
+    C_BG, C_ACCENT, C_ACCENT2, C_BAR_BG = (
+        pdf.C_BG, pdf.C_ACCENT, pdf.C_ACCENT2, pdf.C_BAR_BG)
+    C_TEXT, C_MUTED, C_BLUE, C_BORDER, C_WHITE = (
+        pdf.C_TEXT, pdf.C_MUTED, pdf.C_BLUE, pdf.C_BORDER, pdf.C_WHITE)
+    new_page, ensure_space, simpleSplit = pdf.new_page, pdf.ensure_space, pdf.simpleSplit
     y = TOP_Y
 
     # subtitle: file name + date
@@ -2635,79 +2550,17 @@ def _write_arch_report(path: str, title: str, sheets) -> None:
 
 
 def _write_emotion_report(path: str, title: str, sheets, group_by: str = "character") -> None:
+    _HEADING = "Emotion Analysis"
+    pdf = _make_pdf_session(path, title, _HEADING)
     from datetime import date
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.lib.colors import HexColor, white
-    from reportlab.pdfgen.canvas import Canvas as PDFCanvas
-    from reportlab.lib.utils import simpleSplit
-
-    C_BG      = HexColor("#fdf9f6")
-    C_ACCENT  = HexColor("#c9a96e")
-    C_ACCENT2 = HexColor("#b8954e")
-    C_BAR_BG  = HexColor("#ede0c8")
-    C_TEXT    = HexColor("#111111")
-    C_MUTED   = HexColor("#6b7280")
-    C_BLUE    = HexColor("#1e40af")
-    C_BORDER  = HexColor("#d4ba90")
-    C_WHITE   = white
-
-    W, H = A4
-    MARGIN    = 20 * mm
-    CONTENT_W = W - 2 * MARGIN
-    BAND_H    = 18 * mm
-    FOOTER_H  = 10 * mm
-    TOP_Y     = H - BAND_H - 6 * mm
-
-    logo_path = str(ICON_PATH)
-    logo_size = 13 * mm
-    page_num  = [0]
-
-    c = PDFCanvas(path, pagesize=A4)
-    c.setTitle(f"Mirror — {title} — Emotion Analysis")
-
-    def _draw_page_chrome():
-        page_num[0] += 1
-        c.setFillColor(C_BG)
-        c.rect(0, 0, W, H, fill=1, stroke=0)
-        c.setFillColor(C_ACCENT)
-        c.rect(0, H - BAND_H, W, BAND_H, fill=1, stroke=0)
-        c.setStrokeColor(C_ACCENT2)
-        c.setLineWidth(1)
-        c.line(0, H - BAND_H, W, H - BAND_H)
-
-        # heading inside the band
-        band_mid_y = H - BAND_H + (BAND_H - 5 * mm) / 2
-        c.setFont("Helvetica-Bold", 14)
-        c.setFillColor(C_WHITE)
-        c.drawString(MARGIN, band_mid_y, "Emotion Analysis")
-
-        try:
-            logo_x = W - MARGIN - logo_size
-            logo_y = H - BAND_H + (BAND_H - logo_size) / 2
-            c.drawImage(logo_path, logo_x, logo_y,
-                        width=logo_size, height=logo_size,
-                        preserveAspectRatio=True, mask="auto")
-        except Exception:
-            pass
-        c.setStrokeColor(C_BORDER)
-        c.setLineWidth(0.5)
-        c.line(MARGIN, FOOTER_H, W - MARGIN, FOOTER_H)
-        c.setFont("Helvetica", 8)
-        c.setFillColor(C_MUTED)
-        c.drawCentredString(W / 2, FOOTER_H - 4 * mm, f"Page {page_num[0]}")
-
-    def new_page():
-        c.showPage()
-        _draw_page_chrome()
-
-    def ensure_space(y, needed):
-        if y - needed < FOOTER_H + 4 * mm:
-            new_page()
-            return TOP_Y
-        return y
-
-    _draw_page_chrome()
+    c, W = pdf.c, pdf.W
+    MARGIN, CONTENT_W, FOOTER_H, TOP_Y, mm = (
+        pdf.MARGIN, pdf.CONTENT_W, pdf.FOOTER_H, pdf.TOP_Y, pdf.mm)
+    C_BG, C_ACCENT, C_ACCENT2, C_BAR_BG = (
+        pdf.C_BG, pdf.C_ACCENT, pdf.C_ACCENT2, pdf.C_BAR_BG)
+    C_TEXT, C_MUTED, C_BLUE, C_BORDER, C_WHITE = (
+        pdf.C_TEXT, pdf.C_MUTED, pdf.C_BLUE, pdf.C_BORDER, pdf.C_WHITE)
+    new_page, ensure_space, simpleSplit = pdf.new_page, pdf.ensure_space, pdf.simpleSplit
     y = TOP_Y
 
     # subtitle: file name + date
@@ -2733,57 +2586,17 @@ def _write_emotion_report(path: str, title: str, sheets, group_by: str = "charac
         # Render combined radar
         _radar_img = None
         try:
+            from io import BytesIO as _BIO
+            import matplotlib
+            matplotlib.use("Agg")
             import matplotlib.pyplot as _plt
-            import numpy as _np
-
-            emotions   = load_emotions()
-            by_id_e    = {e["id"]: e for e in emotions}
-            ordered_e  = [by_id_e[eid] for eid in PLUTCHIK_ORDER if eid in by_id_e]
-            ordered_e  += [e for e in emotions if e["id"] not in PLUTCHIK_ORDER]
-            all_ids_e  = [e["id"] for e in ordered_e]
-            labels_e   = [e["name"] for e in ordered_e]
-            N_e        = len(ordered_e)
-            angles_e   = _np.linspace(0, 2 * _np.pi, N_e, endpoint=False).tolist()
-
-            fig_r, ax_r = _plt.subplots(figsize=(5, 5), subplot_kw=dict(polar=True), facecolor="#fdf9f6")
-            ax_r.set_facecolor("#faf5ec")
-            all_vals_e  = []
-            char_data_e = []
-            for sheet in sheets:
-                totals = {eid: 0.0 for eid in all_ids_e}
-                T = sheet.total_signals or 1
-                for sig in sheet.signals_ordered:
-                    for eid, score in sig.get("scores", {}).items():
-                        if eid in totals:
-                            totals[eid] += score
-                raw   = [totals[eid] / T for eid in all_ids_e]
-                floor = max(raw) * 0.06 if max(raw) > 0 else 0
-                vals  = [max(v, floor) for v in raw]
-                all_vals_e.extend(vals)
-                char_data_e.append((sheet.name, vals))
-            if all_vals_e and max(all_vals_e) > 0.05:
-                max_ve = max(all_vals_e)
-                tks = _np.linspace(0, max_ve, 4)[1:]
-                ax_r.set_yticks(tks); ax_r.set_yticklabels([])
-                ax_r.set_ylim(0, max_ve * 1.18)
-                ax_r.yaxis.grid(color="#d4ba90", linewidth=0.5, linestyle="--", alpha=0.7)
-                ax_r.xaxis.grid(color="#d4ba90", linewidth=0.5, alpha=0.5)
-                ax_r.spines["polar"].set_color("#d4ba90")
-                for ci, (cname, vals) in enumerate(char_data_e):
-                    col = CHAR_COLORS[ci % len(CHAR_COLORS)]
-                    vp  = vals + [vals[0]]; ap = angles_e + [angles_e[0]]
-                    ax_r.fill(ap, vp, color=col, alpha=0.18)
-                    ax_r.plot(ap, vp, color=col, linewidth=1.6, label=cname)
-                    ax_r.scatter(angles_e, vals, color=col, s=14, zorder=4, edgecolors="white", linewidths=0.6)
-                ax_r.set_xticks(angles_e); ax_r.set_xticklabels(labels_e, fontsize=7.5, color="#111111")
-                ax_r.legend(fontsize=7, loc="upper right", bbox_to_anchor=(1.32, 1.15),
-                            framealpha=0.85, facecolor="#fdf9f6", edgecolor="#d4ba90")
-                fig_r.tight_layout(pad=0.3)
+            from PIL import Image as _PILImage
+            fig_r = _build_combined_emotion_radar_fig(sheets)
+            if fig_r is not None:
                 _buf_r = _BIO()
                 fig_r.savefig(_buf_r, format="png", dpi=130, bbox_inches="tight", facecolor="#fdf9f6")
                 _plt.close(fig_r)
                 _buf_r.seek(0)
-                from PIL import Image as _PILImage
                 _radar_img = _PILImage.open(_buf_r).copy()
         except Exception:
             pass
@@ -3000,77 +2813,20 @@ def _write_emotion_report(path: str, title: str, sheets, group_by: str = "charac
 
 
 def _write_genre_report(path: str, title: str, results: list[GenreResult]) -> None:
+    _HEADING = "Genre Analysis"
+    pdf = _make_pdf_session(path, title, _HEADING)
     from datetime import date
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.lib.colors import HexColor, white
-    from reportlab.pdfgen.canvas import Canvas as PDFCanvas
-    from reportlab.lib.utils import simpleSplit
-
-    C_BG     = HexColor("#fdf9f6")
-    C_ACCENT = HexColor("#c9a96e")
-    C_ACCENT2= HexColor("#b8954e")
-    C_TEXT   = HexColor("#111111")
-    C_MUTED  = HexColor("#6b7280")
-    C_BORDER = HexColor("#d4ba90")
-    C_HDR    = HexColor("#ede0c8")
-    C_ROW0   = HexColor("#fdf9f6")
-    C_ROW1   = HexColor("#ffffff")
-    C_WHITE  = white
-
-    W, H = A4
-    MARGIN    = 20 * mm
-    CONTENT_W = W - 2 * MARGIN
-    BAND_H    = 18 * mm
-    FOOTER_H  = 10 * mm
-    TOP_Y     = H - BAND_H - 6 * mm
-
-    logo_path = str(ICON_PATH)
-    logo_size = 13 * mm
-    page_num  = [0]
-
-    c = PDFCanvas(path, pagesize=A4)
-    c.setTitle(f"Mirror — {title} — Genre Analysis")
-
-    def _draw_page_chrome():
-        page_num[0] += 1
-        c.setFillColor(C_BG)
-        c.rect(0, 0, W, H, fill=1, stroke=0)
-        c.setFillColor(C_ACCENT)
-        c.rect(0, H - BAND_H, W, BAND_H, fill=1, stroke=0)
-        c.setStrokeColor(C_ACCENT2)
-        c.setLineWidth(1)
-        c.line(0, H - BAND_H, W, H - BAND_H)
-        band_mid_y = H - BAND_H + (BAND_H - 5 * mm) / 2
-        c.setFont("Helvetica-Bold", 14)
-        c.setFillColor(C_WHITE)
-        c.drawString(MARGIN, band_mid_y, "Genre Analysis")
-        try:
-            logo_x = W - MARGIN - logo_size
-            logo_y = H - BAND_H + (BAND_H - logo_size) / 2
-            c.drawImage(logo_path, logo_x, logo_y,
-                        width=logo_size, height=logo_size,
-                        preserveAspectRatio=True, mask="auto")
-        except Exception:
-            pass
-        c.setStrokeColor(C_BORDER)
-        c.setLineWidth(0.5)
-        c.line(MARGIN, FOOTER_H, W - MARGIN, FOOTER_H)
-        c.setFont("Helvetica", 8)
-        c.setFillColor(C_MUTED)
-        c.drawCentredString(W / 2, FOOTER_H - 4 * mm, f"Page {page_num[0]}")
-
-    def new_page():
-        c.showPage()
-        _draw_page_chrome()
-
-    def ensure_space(y, needed):
-        if y - needed < FOOTER_H + 4 * mm:
-            new_page()
-            return TOP_Y
-        return y
-
-    _draw_page_chrome()
+    c, W = pdf.c, pdf.W
+    MARGIN, CONTENT_W, FOOTER_H, TOP_Y, mm = (
+        pdf.MARGIN, pdf.CONTENT_W, pdf.FOOTER_H, pdf.TOP_Y, pdf.mm)
+    C_BG, C_ACCENT, C_ACCENT2, C_BAR_BG = (
+        pdf.C_BG, pdf.C_ACCENT, pdf.C_ACCENT2, pdf.C_BAR_BG)
+    C_TEXT, C_MUTED, C_BLUE, C_BORDER, C_WHITE = (
+        pdf.C_TEXT, pdf.C_MUTED, pdf.C_BLUE, pdf.C_BORDER, pdf.C_WHITE)
+    new_page, ensure_space, simpleSplit = pdf.new_page, pdf.ensure_space, pdf.simpleSplit
+    C_HDR  = C_BAR_BG
+    C_ROW0 = C_BG
+    C_ROW1 = C_WHITE
     y = TOP_Y
 
     c.setFont("Helvetica", 10)
@@ -3267,75 +3023,25 @@ def _cog_btn(parent, command):
 
 
 def _write_opening_report(path: str, title: str, result: OpeningResult) -> None:
+    _HEADING = "Opening Analysis"
+    pdf = _make_pdf_session(path, title, _HEADING)
     from datetime import date
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.lib.colors import HexColor, white
-    from reportlab.pdfgen.canvas import Canvas as PDFCanvas
-    from reportlab.lib.utils import simpleSplit
-
-    C_BG     = HexColor("#fdf9f6")
-    C_ACCENT = HexColor("#c9a96e")
-    C_ACCENT2= HexColor("#b8954e")
-    C_TEXT   = HexColor("#111111")
-    C_MUTED  = HexColor("#6b7280")
-    C_BORDER = HexColor("#d4ba90")
-    C_HDR    = HexColor("#ede0c8")
-    C_ROW0   = HexColor("#fdf9f6")
-    C_ROW1   = HexColor("#ffffff")
-    C_WHITE  = white
-
-    W, H    = A4
-    MARGIN  = 20 * mm
-    CONT_W  = W - 2 * MARGIN
-    BAND_H  = 18 * mm
-    FOOT_H  = 10 * mm
-    TOP_Y   = H - BAND_H - 6 * mm
-
-    COL1_W = 44 * mm   # Checklist item
-    COL3_W = 28 * mm   # Confidence
-    COL2_W = CONT_W - COL1_W - COL3_W
-
-    logo_path = str(ICON_PATH)
-    logo_size = 13 * mm
-    page_num  = [0]
-
-    c = PDFCanvas(path, pagesize=A4)
-    c.setTitle(f"Mirror -- {title} -- Opening Analysis")
-
-    def _draw_chrome():
-        page_num[0] += 1
-        c.setFillColor(C_BG)
-        c.rect(0, 0, W, H, fill=1, stroke=0)
-        c.setFillColor(C_ACCENT)
-        c.rect(0, H - BAND_H, W, BAND_H, fill=1, stroke=0)
-        c.setStrokeColor(C_ACCENT2); c.setLineWidth(1)
-        c.line(0, H - BAND_H, W, H - BAND_H)
-        mid_y = H - BAND_H + (BAND_H - 5 * mm) / 2
-        c.setFont("Helvetica-Bold", 14)
-        c.setFillColor(C_WHITE)
-        c.drawString(MARGIN, mid_y, "Opening Analysis")
-        try:
-            c.drawImage(logo_path, W - MARGIN - logo_size,
-                        H - BAND_H + (BAND_H - logo_size) / 2,
-                        width=logo_size, height=logo_size,
-                        preserveAspectRatio=True, mask="auto")
-        except Exception:
-            pass
-        c.setStrokeColor(C_BORDER); c.setLineWidth(0.5)
-        c.line(MARGIN, FOOT_H, W - MARGIN, FOOT_H)
-        c.setFont("Helvetica", 8); c.setFillColor(C_MUTED)
-        c.drawCentredString(W / 2, FOOT_H - 4 * mm, f"Page {page_num[0]}")
-
-    def new_page():
-        c.showPage(); _draw_chrome()
-
-    def ensure_space(y, needed):
-        if y - needed < FOOT_H + 4 * mm:
-            new_page(); return TOP_Y
-        return y
-
-    _draw_chrome()
+    c, W = pdf.c, pdf.W
+    MARGIN, CONTENT_W, FOOTER_H, TOP_Y, mm = (
+        pdf.MARGIN, pdf.CONTENT_W, pdf.FOOTER_H, pdf.TOP_Y, pdf.mm)
+    C_BG, C_ACCENT, C_ACCENT2, C_BAR_BG = (
+        pdf.C_BG, pdf.C_ACCENT, pdf.C_ACCENT2, pdf.C_BAR_BG)
+    C_TEXT, C_MUTED, C_BLUE, C_BORDER, C_WHITE = (
+        pdf.C_TEXT, pdf.C_MUTED, pdf.C_BLUE, pdf.C_BORDER, pdf.C_WHITE)
+    new_page, ensure_space, simpleSplit = pdf.new_page, pdf.ensure_space, pdf.simpleSplit
+    CONT_W = CONTENT_W
+    FOOT_H = FOOTER_H
+    C_HDR  = C_BAR_BG
+    C_ROW0 = C_BG
+    C_ROW1 = C_WHITE
+    COL1_W = 44 * mm
+    COL3_W = 28 * mm
+    COL2_W = CONTENT_W - COL1_W - COL3_W
     y = TOP_Y
 
     c.setFont("Helvetica", 10); c.setFillColor(C_MUTED)
@@ -3377,10 +3083,13 @@ def _write_opening_report(path: str, title: str, result: OpeningResult) -> None:
             c.drawString(MARGIN + COL1_W + 3 * mm, text_y, ln)
             text_y -= 4.8 * mm
 
-        emoji_str = CONFIDENCE_EMOJI.get(item.confidence, "\U0001f610")
-        c.setFont("Helvetica", 9); c.setFillColor(C_MUTED)
+        from reportlab.lib.colors import HexColor as _HC
+        _CONF_LABEL = {"hug": "High", "neutral": "Medium", "confused": "Low"}
+        _CONF_COLOR = {"hug": _HC("#2a7a2a"), "neutral": C_MUTED, "confused": _HC("#b85c20")}
+        c.setFont("Helvetica-Bold", 9)
+        c.setFillColor(_CONF_COLOR.get(item.confidence, C_MUTED))
         c.drawString(MARGIN + COL1_W + COL2_W + 3 * mm, y - 4 * mm,
-                     f"{emoji_str}  {item.confidence}")
+                     _CONF_LABEL.get(item.confidence, item.confidence))
         y -= row_h
 
     # bottom border
@@ -3392,67 +3101,21 @@ def _write_opening_report(path: str, title: str, result: OpeningResult) -> None:
 
 def _write_plot_report(path: str, title: str, synopsis_result: "SynopsisResult",
                        arcs_result: "ArcsResult | None") -> None:
+    _HEADING = "Plot Analysis"
+    pdf = _make_pdf_session(path, title, _HEADING)
     from datetime import date
-    from reportlab.lib.pagesizes import A4
-    from reportlab.lib.units import mm
-    from reportlab.lib.colors import HexColor, white
-    from reportlab.pdfgen.canvas import Canvas as PDFCanvas
-    from reportlab.lib.utils import simpleSplit
-
-    C_BG     = HexColor("#fdf9f6")
-    C_ACCENT = HexColor("#c9a96e")
-    C_ACCENT2= HexColor("#b8954e")
-    C_TEXT   = HexColor("#111111")
-    C_MUTED  = HexColor("#6b7280")
-    C_BORDER = HexColor("#d4ba90")
-    C_HDR    = HexColor("#ede0c8")
-    C_WHITE  = white
-
-    W, H    = A4
-    MARGIN  = 20 * mm
-    CONT_W  = W - 2 * MARGIN
-    BAND_H  = 18 * mm
-    FOOT_H  = 10 * mm
-    TOP_Y   = H - BAND_H - 6 * mm
-
-    logo_path = str(ICON_PATH)
-    logo_size = 13 * mm
-    page_num  = [0]
-
-    c = PDFCanvas(path, pagesize=A4)
-    c.setTitle(f"Mirror -- {title} -- Plot Analysis")
-
-    def _draw_chrome():
-        page_num[0] += 1
-        c.setFillColor(C_BG)
-        c.rect(0, 0, W, H, fill=1, stroke=0)
-        c.setFillColor(C_ACCENT)
-        c.rect(0, H - BAND_H, W, BAND_H, fill=1, stroke=0)
-        c.setStrokeColor(C_ACCENT2); c.setLineWidth(1)
-        c.line(0, H - BAND_H, W, H - BAND_H)
-        mid_y = H - BAND_H + (BAND_H - 5 * mm) / 2
-        c.setFont("Helvetica-Bold", 14)
-        c.setFillColor(C_WHITE)
-        c.drawString(MARGIN, mid_y, "Plot Analysis")
-        try:
-            c.drawImage(logo_path, W - MARGIN - logo_size,
-                        H - BAND_H + (BAND_H - logo_size) / 2,
-                        width=logo_size, height=logo_size,
-                        preserveAspectRatio=True, mask="auto")
-        except Exception:
-            pass
-        c.setStrokeColor(C_BORDER); c.setLineWidth(0.5)
-        c.line(MARGIN, FOOT_H, W - MARGIN, FOOT_H)
-        c.setFont("Helvetica", 8); c.setFillColor(C_MUTED)
-        c.drawCentredString(W / 2, FOOT_H - 4 * mm, f"Page {page_num[0]}")
-
-    def new_page():
-        c.showPage(); _draw_chrome()
-
-    def ensure_space(y, needed):
-        if y - needed < FOOT_H + 4 * mm:
-            new_page(); return TOP_Y
-        return y
+    c, W = pdf.c, pdf.W
+    MARGIN, CONTENT_W, FOOTER_H, TOP_Y, mm = (
+        pdf.MARGIN, pdf.CONTENT_W, pdf.FOOTER_H, pdf.TOP_Y, pdf.mm)
+    C_BG, C_ACCENT, C_ACCENT2, C_BAR_BG = (
+        pdf.C_BG, pdf.C_ACCENT, pdf.C_ACCENT2, pdf.C_BAR_BG)
+    C_TEXT, C_MUTED, C_BLUE, C_BORDER, C_WHITE = (
+        pdf.C_TEXT, pdf.C_MUTED, pdf.C_BLUE, pdf.C_BORDER, pdf.C_WHITE)
+    new_page, ensure_space, simpleSplit = pdf.new_page, pdf.ensure_space, pdf.simpleSplit
+    CONT_W = CONTENT_W
+    FOOT_H = FOOTER_H
+    C_HDR  = C_BAR_BG
+    y = TOP_Y
 
     def section_header(y, label):
         y = ensure_space(y, 12 * mm)
@@ -3461,9 +3124,6 @@ def _write_plot_report(path: str, title: str, synopsis_result: "SynopsisResult",
         c.setFont("Helvetica-Bold", 9); c.setFillColor(C_TEXT)
         c.drawString(MARGIN + 3 * mm, y - 5 * mm, label)
         return y - 7 * mm
-
-    _draw_chrome()
-    y = TOP_Y
 
     c.setFont("Helvetica", 10); c.setFillColor(C_MUTED)
     c.drawRightString(W - MARGIN, y, title)
@@ -3749,34 +3409,8 @@ class App(tk.Tk):
         open_outer = tk.Frame(open_tab, bg=BG, padx=18, pady=14)
         open_outer.pack(fill=tk.BOTH, expand=True)
 
-        self._open_canvas = tk.Canvas(
-            open_outer, bg=BG_RESULTS, highlightthickness=0, bd=0
-        )
-        open_scrollbar = tk.Scrollbar(
-            open_outer, orient=tk.VERTICAL, command=self._open_canvas.yview
-        )
-        self._open_canvas.configure(yscrollcommand=open_scrollbar.set)
-        open_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self._open_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._open_frame = tk.Frame(self._open_canvas, bg=BG_RESULTS)
-        self._open_window = self._open_canvas.create_window(
-            (0, 0), window=self._open_frame, anchor="nw"
-        )
-        self._open_frame.bind(
-            "<Configure>",
-            lambda _: self._open_canvas.configure(
-                scrollregion=self._open_canvas.bbox("all")
-            ),
-        )
-        self._open_canvas.bind(
-            "<Configure>",
-            lambda e: self._open_canvas.itemconfig(self._open_window, width=e.width),
-        )
-        self._open_canvas.bind(
-            "<MouseWheel>",
-            lambda e: self._open_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
-        )
+        self._open_canvas, self._open_frame, self._open_window = \
+            self._make_scrollable_area(open_outer)
 
     def _build_opening_settings(self, parent) -> tk.Frame:
         panel = tk.Frame(parent, bg=BG_SETTINGS, padx=18, pady=12)
@@ -3910,34 +3544,8 @@ class App(tk.Tk):
         syn_outer = tk.Frame(syn_tab, bg=BG, padx=18, pady=14)
         syn_outer.pack(fill=tk.BOTH, expand=True)
 
-        self._syn_canvas = tk.Canvas(
-            syn_outer, bg=BG_RESULTS, highlightthickness=0, bd=0
-        )
-        syn_scrollbar = tk.Scrollbar(
-            syn_outer, orient=tk.VERTICAL, command=self._syn_canvas.yview
-        )
-        self._syn_canvas.configure(yscrollcommand=syn_scrollbar.set)
-        syn_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self._syn_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._syn_frame = tk.Frame(self._syn_canvas, bg=BG_RESULTS)
-        self._syn_window = self._syn_canvas.create_window(
-            (0, 0), window=self._syn_frame, anchor="nw"
-        )
-        self._syn_frame.bind(
-            "<Configure>",
-            lambda _: self._syn_canvas.configure(
-                scrollregion=self._syn_canvas.bbox("all")
-            ),
-        )
-        self._syn_canvas.bind(
-            "<Configure>",
-            lambda e: self._syn_canvas.itemconfig(self._syn_window, width=e.width),
-        )
-        self._syn_canvas.bind(
-            "<MouseWheel>",
-            lambda e: self._syn_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
-        )
+        self._syn_canvas, self._syn_frame, self._syn_window = \
+            self._make_scrollable_area(syn_outer)
 
     def _build_copyedit_tab(self):
         copy_tab = tk.Frame(self._notebook, bg=BG)
@@ -3970,23 +3578,8 @@ class App(tk.Tk):
         self._results_outer = tk.Frame(copy_tab, bg=BG, padx=18, pady=14)
         self._results_outer.pack(fill=tk.BOTH, expand=True)
 
-        self._canvas = tk.Canvas(
-            self._results_outer, bg=BG_RESULTS, highlightthickness=0, bd=0
-        )
-        scrollbar = tk.Scrollbar(
-            self._results_outer, orient=tk.VERTICAL, command=self._canvas.yview
-        )
-        self._canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._results_frame = tk.Frame(self._canvas, bg=BG_RESULTS)
-        self._canvas_window = self._canvas.create_window(
-            (0, 0), window=self._results_frame, anchor="nw"
-        )
-        self._results_frame.bind("<Configure>", self._on_frame_resize)
-        self._canvas.bind("<Configure>", self._on_canvas_resize)
-        self._canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self._canvas, self._results_frame, self._canvas_window = \
+            self._make_scrollable_area(self._results_outer)
 
     def _build_archetypes_tab(self):
         arch_tab = tk.Frame(self._notebook, bg=BG)
@@ -4019,34 +3612,8 @@ class App(tk.Tk):
         self._char_outer = tk.Frame(arch_tab, bg=BG, padx=18, pady=14)
         self._char_outer.pack(fill=tk.BOTH, expand=True)
 
-        self._char_canvas = tk.Canvas(
-            self._char_outer, bg=BG_RESULTS, highlightthickness=0, bd=0
-        )
-        char_scrollbar = tk.Scrollbar(
-            self._char_outer, orient=tk.VERTICAL, command=self._char_canvas.yview
-        )
-        self._char_canvas.configure(yscrollcommand=char_scrollbar.set)
-        char_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self._char_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._char_frame = tk.Frame(self._char_canvas, bg=BG_RESULTS)
-        self._char_window = self._char_canvas.create_window(
-            (0, 0), window=self._char_frame, anchor="nw"
-        )
-        self._char_frame.bind(
-            "<Configure>",
-            lambda _: self._char_canvas.configure(
-                scrollregion=self._char_canvas.bbox("all")
-            ),
-        )
-        self._char_canvas.bind(
-            "<Configure>",
-            lambda e: self._char_canvas.itemconfig(self._char_window, width=e.width),
-        )
-        self._char_canvas.bind(
-            "<MouseWheel>",
-            lambda e: self._char_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
-        )
+        self._char_canvas, self._char_frame, self._char_window = \
+            self._make_scrollable_area(self._char_outer)
 
     def _build_emotions_tab(self):
         emot_tab = tk.Frame(self._notebook, bg=BG)
@@ -4078,34 +3645,8 @@ class App(tk.Tk):
         self._emot_outer = tk.Frame(emot_tab, bg=BG, padx=18, pady=14)
         self._emot_outer.pack(fill=tk.BOTH, expand=True)
 
-        self._emot_canvas = tk.Canvas(
-            self._emot_outer, bg=BG_RESULTS, highlightthickness=0, bd=0
-        )
-        emot_scrollbar = tk.Scrollbar(
-            self._emot_outer, orient=tk.VERTICAL, command=self._emot_canvas.yview
-        )
-        self._emot_canvas.configure(yscrollcommand=emot_scrollbar.set)
-        emot_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self._emot_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._emot_frame = tk.Frame(self._emot_canvas, bg=BG_RESULTS)
-        self._emot_window = self._emot_canvas.create_window(
-            (0, 0), window=self._emot_frame, anchor="nw"
-        )
-        self._emot_frame.bind(
-            "<Configure>",
-            lambda _: self._emot_canvas.configure(
-                scrollregion=self._emot_canvas.bbox("all")
-            ),
-        )
-        self._emot_canvas.bind(
-            "<Configure>",
-            lambda e: self._emot_canvas.itemconfig(self._emot_window, width=e.width),
-        )
-        self._emot_canvas.bind(
-            "<MouseWheel>",
-            lambda e: self._emot_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
-        )
+        self._emot_canvas, self._emot_frame, self._emot_window = \
+            self._make_scrollable_area(self._emot_outer)
 
     def _build_personality_tab(self):
         pers_tab = tk.Frame(self._notebook, bg=BG)
@@ -4137,34 +3678,8 @@ class App(tk.Tk):
         self._pers_outer = tk.Frame(pers_tab, bg=BG, padx=18, pady=14)
         self._pers_outer.pack(fill=tk.BOTH, expand=True)
 
-        self._pers_canvas = tk.Canvas(
-            self._pers_outer, bg=BG_RESULTS, highlightthickness=0, bd=0
-        )
-        pers_scrollbar = tk.Scrollbar(
-            self._pers_outer, orient=tk.VERTICAL, command=self._pers_canvas.yview
-        )
-        self._pers_canvas.configure(yscrollcommand=pers_scrollbar.set)
-        pers_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self._pers_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._pers_frame = tk.Frame(self._pers_canvas, bg=BG_RESULTS)
-        self._pers_window = self._pers_canvas.create_window(
-            (0, 0), window=self._pers_frame, anchor="nw"
-        )
-        self._pers_frame.bind(
-            "<Configure>",
-            lambda _: self._pers_canvas.configure(
-                scrollregion=self._pers_canvas.bbox("all")
-            ),
-        )
-        self._pers_canvas.bind(
-            "<Configure>",
-            lambda e: self._pers_canvas.itemconfig(self._pers_window, width=e.width),
-        )
-        self._pers_canvas.bind(
-            "<MouseWheel>",
-            lambda e: self._pers_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
-        )
+        self._pers_canvas, self._pers_frame, self._pers_window = \
+            self._make_scrollable_area(self._pers_outer)
 
     def _build_genre_tab(self):
         genre_tab = tk.Frame(self._notebook, bg=BG)
@@ -4197,34 +3712,8 @@ class App(tk.Tk):
         self._genre_outer = tk.Frame(genre_tab, bg=BG, padx=18, pady=14)
         self._genre_outer.pack(fill=tk.BOTH, expand=True)
 
-        self._genre_canvas = tk.Canvas(
-            self._genre_outer, bg=BG_RESULTS, highlightthickness=0, bd=0
-        )
-        genre_scrollbar = tk.Scrollbar(
-            self._genre_outer, orient=tk.VERTICAL, command=self._genre_canvas.yview
-        )
-        self._genre_canvas.configure(yscrollcommand=genre_scrollbar.set)
-        genre_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self._genre_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._genre_frame = tk.Frame(self._genre_canvas, bg=BG_RESULTS)
-        self._genre_window = self._genre_canvas.create_window(
-            (0, 0), window=self._genre_frame, anchor="nw"
-        )
-        self._genre_frame.bind(
-            "<Configure>",
-            lambda _: self._genre_canvas.configure(
-                scrollregion=self._genre_canvas.bbox("all")
-            ),
-        )
-        self._genre_canvas.bind(
-            "<Configure>",
-            lambda e: self._genre_canvas.itemconfig(self._genre_window, width=e.width),
-        )
-        self._genre_canvas.bind(
-            "<MouseWheel>",
-            lambda e: self._genre_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
-        )
+        self._genre_canvas, self._genre_frame, self._genre_window = \
+            self._make_scrollable_area(self._genre_outer)
         self._genre_results: list[GenreResult] = []
 
     # ── settings panels ────────────────────────────────────────────────────────
@@ -4340,78 +3829,36 @@ class App(tk.Tk):
             return list(found.values())
         return []
 
+    def _add_item_to_grid(self, item, key_field, vars_dict, custom_list, grid, count_attr, cols=5):
+        key = item.get(key_field, "")
+        if not key or key in vars_dict:
+            return
+        custom_list.append(item)
+        var = tk.BooleanVar(value=True)
+        vars_dict[key] = var
+        n = getattr(self, count_attr)
+        row, col = divmod(n, cols)
+        tk.Checkbutton(
+            grid, text=item.get("name", key), variable=var,
+            font=FONT_SMALL, bg=BG_SETTINGS, fg=TEXT,
+            activebackground=BG_SETTINGS, activeforeground=TEXT,
+            selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
+        ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
+        setattr(self, count_attr, n + 1)
+
     def _restore_custom_items(self, kind: str, items: list) -> None:
         """Re-insert cached custom elements into state and settings grid (main-thread only)."""
-        if not items:
+        cfg = {
+            "archetype": ("id",   self._archetype_vars,   self._custom_archetypes,    self._arch_grid,  "_arch_grid_count",  5),
+            "emotion":   ("id",   self._emotion_vars,     self._custom_emotions,      self._emot_grid,  "_emot_grid_count",  5),
+            "trait":     ("id",   self._personality_vars, self._custom_personalities, self._pers_grid,  "_pers_grid_count",  5),
+            "genre":     ("name", self._genre_vars,       self._custom_genres,        self._genre_grid, "_genre_grid_count", 4),
+        }
+        if kind not in cfg:
             return
-        if kind == "archetype":
-            for item in items:
-                aid = item.get("id", "")
-                if not aid or aid in self._archetype_vars:
-                    continue
-                self._custom_archetypes.append(item)
-                var = tk.BooleanVar(value=True)
-                self._archetype_vars[aid] = var
-                cols = 5
-                row, col = divmod(self._arch_grid_count, cols)
-                tk.Checkbutton(
-                    self._arch_grid, text=item["name"], variable=var,
-                    font=FONT_SMALL, bg=BG_SETTINGS, fg=TEXT,
-                    activebackground=BG_SETTINGS, activeforeground=TEXT,
-                    selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
-                ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
-                self._arch_grid_count += 1
-        elif kind == "emotion":
-            for item in items:
-                eid = item.get("id", "")
-                if not eid or eid in self._emotion_vars:
-                    continue
-                self._custom_emotions.append(item)
-                var = tk.BooleanVar(value=True)
-                self._emotion_vars[eid] = var
-                cols = 5
-                row, col = divmod(self._emot_grid_count, cols)
-                tk.Checkbutton(
-                    self._emot_grid, text=item["name"], variable=var,
-                    font=FONT_SMALL, bg=BG_SETTINGS, fg=TEXT,
-                    activebackground=BG_SETTINGS, activeforeground=TEXT,
-                    selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
-                ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
-                self._emot_grid_count += 1
-        elif kind == "trait":
-            for item in items:
-                tid = item.get("id", "")
-                if not tid or tid in self._personality_vars:
-                    continue
-                self._custom_personalities.append(item)
-                var = tk.BooleanVar(value=True)
-                self._personality_vars[tid] = var
-                cols = 5
-                row, col = divmod(self._pers_grid_count, cols)
-                tk.Checkbutton(
-                    self._pers_grid, text=item["name"], variable=var,
-                    font=FONT_SMALL, bg=BG_SETTINGS, fg=TEXT,
-                    activebackground=BG_SETTINGS, activeforeground=TEXT,
-                    selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
-                ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
-                self._pers_grid_count += 1
-        elif kind == "genre":
-            for item in items:
-                name = item.get("name", "")
-                if not name or name in self._genre_vars:
-                    continue
-                self._custom_genres.append(item)
-                var = tk.BooleanVar(value=True)
-                self._genre_vars[name] = var
-                cols = 4
-                row, col = divmod(self._genre_grid_count, cols)
-                tk.Checkbutton(
-                    self._genre_grid, text=name, variable=var,
-                    font=FONT_SMALL, bg=BG_SETTINGS, fg=TEXT,
-                    activebackground=BG_SETTINGS, activeforeground=TEXT,
-                    selectcolor=BG_SETTINGS, anchor="w", cursor="hand2",
-                ).grid(row=row, column=col, sticky="w", padx=(0, 10), pady=1)
-                self._genre_grid_count += 1
+        key_field, vars_dict, custom_list, grid, count_attr, cols = cfg[kind]
+        for item in items:
+            self._add_item_to_grid(item, key_field, vars_dict, custom_list, grid, count_attr, cols)
 
     # ── custom-item dialogs ────────────────────────────────────────────────────
 
@@ -5061,16 +4508,33 @@ class App(tk.Tk):
         except Exception:
             pass
 
-    # ── canvas helpers ─────────────────────────────────────────────────────────
+    def _make_scrollable_area(self, outer_frame):
+        """Create a canvas/scrollbar/frame inside outer_frame. Returns (canvas, frame, window_id)."""
+        canvas = tk.Canvas(outer_frame, bg=BG_RESULTS, highlightthickness=0, bd=0)
+        scrollbar = tk.Scrollbar(outer_frame, orient=tk.VERTICAL, command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        frame = tk.Frame(canvas, bg=BG_RESULTS)
+        window = canvas.create_window((0, 0), window=frame, anchor="nw")
+        frame.bind("<Configure>", lambda _: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(window, width=e.width))
+        canvas.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
+        return canvas, frame, window
 
-    def _on_frame_resize(self, _):
-        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
 
-    def _on_canvas_resize(self, event):
-        self._canvas.itemconfig(self._canvas_window, width=event.width)
 
-    def _on_mousewheel(self, event):
-        self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    @property
+    def _tab_registry(self) -> list:
+        return [
+            _TabDef(self._open_frame,    "Click Analyze to read the opening and annotate first impressions.", self._btn_save_opening),
+            _TabDef(self._syn_frame,     "Click Analyze to build a synopsis of this manuscript.",             self._btn_save_syn),
+            _TabDef(self._results_frame, "Click Analyze to copyedit this manuscript.",                        self._btn_save),
+            _TabDef(self._char_frame,    "Click Analyze to identify characters and map archetypes.",          self._btn_save_arch),
+            _TabDef(self._emot_frame,    "Click Analyze to map character emotions across the manuscript.",    self._btn_save_emot),
+            _TabDef(self._pers_frame,    "Click Analyze to score Big Five personality traits.",               self._btn_save_pers),
+            _TabDef(self._genre_frame,   "Click Analyze to detect genre signals across the manuscript.",      self._btn_save_genre),
+        ]
 
     def _bind_mousewheel(self, widget, canvas):
         widget.bind("<MouseWheel>", lambda e: canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"))
@@ -5078,45 +4542,21 @@ class App(tk.Tk):
             self._bind_mousewheel(child, canvas)
 
     def _clear_results(self):
-        for w in self._open_frame.winfo_children():
-            w.destroy()
-        for w in self._syn_frame.winfo_children():
-            w.destroy()
-        for w in self._results_frame.winfo_children():
-            w.destroy()
-        for w in self._char_frame.winfo_children():
-            w.destroy()
-        for w in self._emot_frame.winfo_children():
-            w.destroy()
-        for w in self._genre_frame.winfo_children():
-            w.destroy()
+        for tab in self._tab_registry:
+            for w in tab.frame.winfo_children():
+                w.destroy()
 
     def _show_placeholder(self):
-        tk.Label(self._open_frame,
-                 text="Click Analyze to read the opening and annotate first impressions.",
-                 font=FONT_BODY, fg=TEXT_MUTED, bg=BG_RESULTS).pack(pady=30)
-        tk.Label(self._syn_frame,
-                 text="Click Analyze to build a synopsis of this manuscript.",
-                 font=FONT_BODY, fg=TEXT_MUTED, bg=BG_RESULTS).pack(pady=30)
-        tk.Label(self._results_frame,
-                 text="Click Analyze to copyedit this manuscript.",
-                 font=FONT_BODY, fg=TEXT_MUTED, bg=BG_RESULTS).pack(pady=30)
-        tk.Label(self._char_frame,
-                 text="Click Analyze to identify characters and map archetypes.",
-                 font=FONT_BODY, fg=TEXT_MUTED, bg=BG_RESULTS).pack(pady=30)
-        tk.Label(self._emot_frame,
-                 text="Click Analyze to map character emotions across the manuscript.",
-                 font=FONT_BODY, fg=TEXT_MUTED, bg=BG_RESULTS).pack(pady=30)
-        tk.Label(self._genre_frame,
-                 text="Click Analyze to detect genre signals across the manuscript.",
-                 font=FONT_BODY, fg=TEXT_MUTED, bg=BG_RESULTS).pack(pady=30)
+        for tab in self._tab_registry:
+            tk.Label(tab.frame, text=tab.placeholder,
+                     font=FONT_BODY, fg=TEXT_MUTED, bg=BG_RESULTS).pack(pady=30)
 
     # ── file open ──────────────────────────────────────────────────────────────
 
     def _delete_caches(self):
         if not self._filepath:
             return
-        from core.cache import _cache_path, CACHE_DIR
+        from core.cache import _cache_path
         kinds = ("copyedit", "archetypes", "emotions", "personality", "genres", "synopsis", "opening", "arcs")
         existing = [_cache_path(self._filepath, k) for k in kinds
                     if _cache_path(self._filepath, k).exists()]
@@ -5159,12 +4599,8 @@ class App(tk.Tk):
             self._status_pers.config(text="")
             self._status_genre.config(text="")
             self._status_synopsis.config(text="")
-            self._btn_save_opening.pack_forget()
-            self._btn_save.pack_forget()
-            self._btn_save_arch.pack_forget()
-            self._btn_save_emot.pack_forget()
-            self._btn_save_pers.pack_forget()
-            self._btn_save_syn.pack_forget()
+            for tab in self._tab_registry:
+                tab.save_btn.pack_forget()
             popup.destroy()
 
         _flat_btn(btn_row, "Delete", _confirm, primary=True).pack(side=tk.LEFT, padx=(0, 8))
@@ -5193,12 +4629,8 @@ class App(tk.Tk):
         self._btn_analyze_pers.config(state=tk.NORMAL)
         self._btn_analyze_genre.config(state=tk.NORMAL)
         self._btn_regen_synopsis.config(state=tk.NORMAL)
-        self._btn_save_opening.pack_forget()
-        self._btn_save.pack_forget()
-        self._btn_save_arch.pack_forget()
-        self._btn_save_emot.pack_forget()
-        self._btn_save_pers.pack_forget()
-        self._btn_save_syn.pack_forget()
+        for tab in self._tab_registry:
+            tab.save_btn.pack_forget()
         self._clear_results()
         self._show_placeholder()
         self._status_opening.config(text="")
@@ -5630,7 +5062,7 @@ class App(tk.Tk):
             save_copyedit_cache(self._filepath, results)
             self.after(0, self._show, results)
         except Exception as exc:
-            self.after(0, self._show_error_copy, exc)
+            self.after(0, self._show_analysis_error, self._results_frame, self._status_copy, self._btn_analyze_copy, exc)
 
     # ── archetype analysis ─────────────────────────────────────────────────────
 
@@ -5715,7 +5147,7 @@ class App(tk.Tk):
             save_arch_cache(self._filepath, sheets, self._custom_archetypes or None)
             self.after(0, self._show_characters, sheets)
         except Exception as exc:
-            self.after(0, self._show_error_arch, exc)
+            self.after(0, self._show_analysis_error, self._char_frame, self._status_arch, self._btn_analyze_arch, exc)
 
     # ── emotion analysis ───────────────────────────────────────────────────────
 
@@ -5766,7 +5198,7 @@ class App(tk.Tk):
             save_emotion_cache(self._filepath, sheets, self._custom_emotions or None)
             self.after(0, self._show_emotion_results, sheets)
         except Exception as exc:
-            self.after(0, self._show_error_emot, exc)
+            self.after(0, self._show_analysis_error, self._emot_frame, self._status_emot, self._btn_analyze_emot, exc)
 
     # ── display: copyedit ──────────────────────────────────────────────────────
 
@@ -6184,32 +5616,14 @@ class App(tk.Tk):
 
     # ── errors ─────────────────────────────────────────────────────────────────
 
-    def _show_error_copy(self, exc: Exception):
-        for w in self._results_frame.winfo_children():
+    def _show_analysis_error(self, frame, status_lbl, analyze_btn, exc: Exception):
+        for w in frame.winfo_children():
             w.destroy()
-        tk.Label(self._results_frame, text=f"Error: {exc}",
+        tk.Label(frame, text=f"Error: {exc}",
                  font=FONT_BODY, fg="#e05252", bg=BG_RESULTS, anchor="w"
                  ).pack(padx=16, pady=20)
-        self._status_copy.config(text="Error.")
-        self._btn_analyze_copy.config(state=tk.NORMAL)
-
-    def _show_error_arch(self, exc: Exception):
-        for w in self._char_frame.winfo_children():
-            w.destroy()
-        tk.Label(self._char_frame, text=f"Error: {exc}",
-                 font=FONT_BODY, fg="#e05252", bg=BG_RESULTS, anchor="w"
-                 ).pack(padx=16, pady=20)
-        self._status_arch.config(text="Error.")
-        self._btn_analyze_arch.config(state=tk.NORMAL)
-
-    def _show_error_emot(self, exc: Exception):
-        for w in self._emot_frame.winfo_children():
-            w.destroy()
-        tk.Label(self._emot_frame, text=f"Error: {exc}",
-                 font=FONT_BODY, fg="#e05252", bg=BG_RESULTS, anchor="w"
-                 ).pack(padx=16, pady=20)
-        self._status_emot.config(text="Error.")
-        self._btn_analyze_emot.config(state=tk.NORMAL)
+        status_lbl.config(text="Error.")
+        analyze_btn.config(state=tk.NORMAL)
 
     # ── personality analysis ───────────────────────────────────────────────────
 
@@ -6260,7 +5674,7 @@ class App(tk.Tk):
             save_personality_cache(self._filepath, sheets, self._custom_personalities or None)
             self.after(0, self._show_personality_results, sheets)
         except Exception as exc:
-            self.after(0, self._show_error_pers, exc)
+            self.after(0, self._show_analysis_error, self._pers_frame, self._status_pers, self._btn_analyze_pers, exc)
 
     def _show_personality_results(self, sheets: list[CharacterSheet]):
         self._personality_sheets = sheets
@@ -6382,15 +5796,6 @@ class App(tk.Tk):
                  font=FONT_SMALL, fg=TEXT_MUTED, bg=BG, anchor="w"
                  ).pack(fill=tk.X, pady=(6, 0))
 
-    def _show_error_pers(self, exc: Exception):
-        for w in self._pers_frame.winfo_children():
-            w.destroy()
-        tk.Label(self._pers_frame, text=f"Error: {exc}",
-                 font=FONT_BODY, fg="#e05252", bg=BG_RESULTS, anchor="w"
-                 ).pack(padx=16, pady=20)
-        self._status_pers.config(text="Error.")
-        self._btn_analyze_pers.config(state=tk.NORMAL)
-
     # ── genre analysis ─────────────────────────────────────────────────────────
 
     def _start_genre(self, from_cache_only: bool = False):
@@ -6431,7 +5836,7 @@ class App(tk.Tk):
             save_genre_cache(self._filepath, results, self._custom_genres or None)
             self.after(0, self._show_genre_results, results)
         except Exception as exc:
-            self.after(0, self._show_error_genre, exc)
+            self.after(0, self._show_analysis_error, self._genre_frame, self._status_genre, self._btn_analyze_genre, exc)
 
     def _show_genre_results(self, results: list[GenreResult]):
         self._genre_results = results
@@ -6463,15 +5868,6 @@ class App(tk.Tk):
         self._bind_mousewheel(self._genre_frame, self._genre_canvas)
         self._btn_analyze_genre.config(state=tk.NORMAL)
         self._status_genre.config(text="Done.")
-
-    def _show_error_genre(self, exc: Exception):
-        for w in self._genre_frame.winfo_children():
-            w.destroy()
-        tk.Label(self._genre_frame, text=f"Error: {exc}",
-                 font=FONT_BODY, fg="#e05252", bg=BG_RESULTS, anchor="w"
-                 ).pack(padx=16, pady=20)
-        self._status_genre.config(text="Error.")
-        self._btn_analyze_genre.config(state=tk.NORMAL)
 
     def _save_genre_report(self):
         if not self._genre_results or not self._filepath:

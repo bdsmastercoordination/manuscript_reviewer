@@ -78,7 +78,8 @@ def _parse_arcs(text: str) -> list[ArcResult]:
             start=start_m.group(1).strip(),
             end=end_m.group(1).strip(),
         ))
-    return results
+    seen = set()
+    return [r for r in results if not (r.name in seen or seen.add(r.name))]
 
 
 # ── pass 1: structural arcs ───────────────────────────────────────────────────
